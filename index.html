@@ -1,0 +1,865 @@
+import { useState, useEffect, useCallback } from "react";
+import { createClient } from "@supabase/supabase-js";
+import jsPDF from "jspdf";
+import "jspdf-autotable";
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const T = {
+  bg:"#0d1117",surface:"#161b22",surface2:"#1e2530",border:"#2a3441",
+  accent:"#00c6ff",success:"#00e676",warning:"#ffb300",danger:"#ff5252",
+  text:"#e6edf3",muted:"#7d8590",white:"#ffffff",
+};
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+const supabase = SUPABASE_URL ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+
+const MYDATA_SANDBOX = "https://mydataapidev.aade.gr/AADE-Public-api-myDATA-v1_0_8";
+const MYDATA_PROD    = "https://mydataapi.aade.gr/AADE-Public-api-myDATA-v1_0_8";
+
+const INVOICE_TYPES = [
+  { value:"1.1",  label:"1.1 — Τιμολόγιο Πώλησης" },
+  { value:"2.1",  label:"2.1 — Τιμολόγιο Παροχής Υπηρεσιών" },
+  { value:"11.1", label:"11.1 — ΑΠΥ" },
+  { value:"11.2", label:"11.2 — ΑΛΠ" },
+];
+const VAT_CATS = [
+  { value:1, label:"24%", rate:0.24 },
+  { value:2, label:"13%", rate:0.13 },
+  { value:3, label:"6%",  rate:0.06 },
+  { value:4, label:"0% — Εξαιρούμενο", rate:0 },
+];
+const PAYMENT_METHODS = [
+  { value:1, label:"Επαγγελματικός Λογαριασμός" },
+  { value:3, label:"Μετρητά" },
+  { value:4, label:"Επιταγή" },
+  { value:5, label:"Πίστωση (Credit)" },
+  { value:6, label:"Κάρτα / Web Banking" },
+  { value:7, label:"IRIS" },
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const fmt = n => n.toLocaleString("el-GR",{minimumFractionDigits:2,maximumFractionDigits:2});
+const today = () => new Date().toISOString().split("T")[0];
+const emptyLine = () => ({ description:"", quantity:1, unitPrice:0, vatCategory:1, netValue:0, vatAmount:0 });
+const emptyInvoice = () => ({
+  type:"2.1", series:"Α", issueDate:today(),
+  counterpart:{ name:"", vatNumber:"", address:"", city:"", country:"GR" },
+  paymentMethod:3,
+  lines:[emptyLine()],
+  notes:"", status:"draft", mark:null, uid:null,
+});
+
+// ── XML builder ───────────────────────────────────────────────────────────────
+function buildXML(inv, issuer, number) {
+  const net   = inv.lines.reduce((s,l) => s+l.netValue, 0);
+  const vat   = inv.lines.reduce((s,l) => s+l.vatAmount, 0);
+  const gross = net+vat;
+  const linesXML = inv.lines.map((l,i) => `
+        <invoiceDetails>
+          <lineNumber>${i+1}</lineNumber>
+          <netValue>${l.netValue.toFixed(2)}</netValue>
+          <vatCategory>${l.vatCategory}</vatCategory>
+          <vatAmount>${l.vatAmount.toFixed(2)}</vatAmount>
+        </invoiceDetails>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<RequestDoc>
+  <InvoicesDoc>
+    <invoice>
+      <issuer>
+        <vatNumber>${issuer.vatNumber}</vatNumber>
+        <country>GR</country>
+        <branch>0</branch>
+      </issuer>
+      ${inv.counterpart.vatNumber ? `<counterpart>
+        <vatNumber>${inv.counterpart.vatNumber}</vatNumber>
+        <country>${inv.counterpart.country||"GR"}</country>
+        <branch>0</branch>
+      </counterpart>` : ""}
+      <invoiceHeader>
+        <series>${inv.series}</series>
+        <aa>${number}</aa>
+        <issueDate>${inv.issueDate}</issueDate>
+        <invoiceType>${inv.type}</invoiceType>
+        <currency>EUR</currency>
+      </invoiceHeader>
+      <paymentMethods>
+        <paymentMethodDetails>
+          <type>${inv.paymentMethod}</type>
+          <amount>${gross.toFixed(2)}</amount>
+        </paymentMethodDetails>
+      </paymentMethods>
+      ${linesXML}
+      <invoiceSummary>
+        <totalNetValue>${net.toFixed(2)}</totalNetValue>
+        <totalVatAmount>${vat.toFixed(2)}</totalVatAmount>
+        <totalWithheldAmount>0.00</totalWithheldAmount>
+        <totalFeesAmount>0.00</totalFeesAmount>
+        <totalStampDutyAmount>0.00</totalStampDutyAmount>
+        <totalOtherTaxesAmount>0.00</totalOtherTaxesAmount>
+        <totalDeductionsAmount>0.00</totalDeductionsAmount>
+        <totalGrossValue>${gross.toFixed(2)}</totalGrossValue>
+        <incomeClassification>
+          <classificationType>E3_561_001</classificationType>
+          <classificationCategory>category1_1</classificationCategory>
+          <amount>${net.toFixed(2)}</amount>
+        </incomeClassification>
+      </invoiceSummary>
+    </invoice>
+  </InvoicesDoc>
+</RequestDoc>`;
+}
+
+// ── PDF generator ─────────────────────────────────────────────────────────────
+function generatePDF(inv, issuer) {
+  const doc = new jsPDF({ orientation:"portrait", unit:"mm", format:"a4" });
+  const W = 210; const pageH = 297;
+  const net   = inv.lines.reduce((s,l) => s+(l.netValue||0), 0);
+  const vat   = inv.lines.reduce((s,l) => s+(l.vatAmount||0), 0);
+  const gross = net+vat;
+  const typeLabel = INVOICE_TYPES.find(t=>t.value===inv.type)?.label || inv.type;
+  const pmLabel   = PAYMENT_METHODS.find(p=>p.value===inv.paymentMethod)?.label || "";
+
+  // Header bar
+  doc.setFillColor(13,17,23);
+  doc.rect(0,0,W,32,"F");
+  doc.setTextColor(0,198,255);
+  doc.setFontSize(20); doc.setFont("helvetica","bold");
+  doc.text("myDATA·app", 14, 14);
+  doc.setFontSize(9); doc.setFont("helvetica","normal");
+  doc.setTextColor(125,133,144);
+  doc.text("Τιμολόγηση & myDATA", 14, 20);
+  doc.setTextColor(230,237,243);
+  doc.setFontSize(14); doc.setFont("helvetica","bold");
+  doc.text(typeLabel, 14, 28);
+
+  // Invoice number + date top right
+  doc.setFontSize(10); doc.setFont("helvetica","bold");
+  doc.setTextColor(0,198,255);
+  doc.text(`${inv.series}${inv.number}`, W-14, 14, {align:"right"});
+  doc.setFontSize(8); doc.setFont("helvetica","normal");
+  doc.setTextColor(125,133,144);
+  doc.text(`Ημερομηνία: ${inv.issueDate}`, W-14, 20, {align:"right"});
+  if (inv.mark) {
+    doc.setTextColor(0,230,118);
+    doc.text(`MARK: ${inv.mark}`, W-14, 26, {align:"right"});
+  }
+
+  let y = 42;
+
+  // Two-column: Issuer | Counterpart
+  const colW = (W-28)/2;
+  const drawBox = (x, title, lines) => {
+    doc.setFillColor(22,27,34);
+    doc.roundedRect(x, y, colW, 36, 2, 2, "F");
+    doc.setFontSize(7); doc.setFont("helvetica","bold");
+    doc.setTextColor(125,133,144);
+    doc.text(title.toUpperCase(), x+5, y+6);
+    doc.setFontSize(9); doc.setFont("helvetica","bold");
+    doc.setTextColor(230,237,243);
+    let ly = y+13;
+    lines.forEach((l,i) => {
+      doc.setFont("helvetica", i===0?"bold":"normal");
+      doc.setFontSize(i===0?9:8);
+      doc.setTextColor(i===0?[230,237,243]:[125,133,144]);
+      if(l) doc.text(l, x+5, ly);
+      ly+=5;
+    });
+  };
+  drawBox(14, "Εκδότης", [
+    issuer.issuerName || "—",
+    issuer.issuerAddress || "",
+    `ΑΦΜ: ${issuer.vatNumber || "—"}`,
+  ]);
+  drawBox(14+colW+4, "Αντισυμβαλλόμενος", [
+    inv.counterpart.name || "—",
+    inv.counterpart.address || "",
+    inv.counterpart.vatNumber ? `ΑΦΜ: ${inv.counterpart.vatNumber}` : "",
+    inv.counterpart.city || "",
+  ]);
+  y += 42;
+
+  // Lines table
+  doc.autoTable({
+    startY: y,
+    head:[["Περιγραφή","Ποσ.","Τιμή μον.","ΦΠΑ","Καθαρή αξία","ΦΠΑ €","Σύνολο"]],
+    body: inv.lines.map(l => {
+      const vatLabel = VAT_CATS.find(v=>v.value===l.vatCategory)?.label||"";
+      return [
+        l.description || "—",
+        l.quantity,
+        `€${fmt(l.unitPrice||0)}`,
+        vatLabel,
+        `€${fmt(l.netValue||0)}`,
+        `€${fmt(l.vatAmount||0)}`,
+        `€${fmt((l.netValue||0)+(l.vatAmount||0))}`,
+      ];
+    }),
+    styles:{ fontSize:8, cellPadding:3, textColor:[230,237,243], fillColor:[22,27,34], lineColor:[42,52,65], lineWidth:0.2 },
+    headStyles:{ fillColor:[13,17,23], textColor:[125,133,144], fontStyle:"bold", fontSize:7 },
+    alternateRowStyles:{ fillColor:[30,37,48] },
+    columnStyles:{
+      0:{cellWidth:55},1:{cellWidth:12,halign:"center"},2:{cellWidth:20,halign:"right"},
+      3:{cellWidth:15,halign:"center"},4:{cellWidth:26,halign:"right"},
+      5:{cellWidth:20,halign:"right"},6:{cellWidth:24,halign:"right"},
+    },
+    margin:{left:14,right:14},
+  });
+
+  y = doc.lastAutoTable.finalY + 8;
+
+  // Totals box (right aligned)
+  const tbX = W-14-72; const tbW = 72;
+  doc.setFillColor(13,17,23);
+  doc.roundedRect(tbX, y, tbW, 36, 2, 2, "F");
+  const rows = [
+    ["Καθαρή αξία:", `€${fmt(net)}`],
+    ["ΦΠΑ:", `€${fmt(vat)}`],
+    ["ΣΥΝΟΛΟ:", `€${fmt(gross)}`],
+  ];
+  let ty = y+9;
+  rows.forEach(([label,val],i) => {
+    doc.setFontSize(i===2?10:8);
+    doc.setFont("helvetica", i===2?"bold":"normal");
+    doc.setTextColor(i===2?[0,198,255]:[125,133,144]);
+    doc.text(label, tbX+5, ty);
+    doc.setTextColor(i===2?[0,198,255]:[230,237,243]);
+    doc.text(val, tbX+tbW-5, ty, {align:"right"});
+    ty += i===1?7:6;
+  });
+
+  // Payment method
+  doc.setFontSize(8); doc.setFont("helvetica","normal");
+  doc.setTextColor(125,133,144);
+  doc.text(`Τρόπος πληρωμής: ${pmLabel}`, 14, y+8);
+
+  // Notes
+  if(inv.notes) {
+    doc.setFontSize(8); doc.setTextColor(125,133,144);
+    doc.text(`Παρατηρήσεις: ${inv.notes}`, 14, y+16);
+  }
+
+  // Footer
+  doc.setFillColor(13,17,23);
+  doc.rect(0, pageH-14, W, 14, "F");
+  doc.setFontSize(7); doc.setTextColor(125,133,144);
+  doc.text("Παράγθηκε από myDATA·app — mydata.aade.gr", W/2, pageH-6, {align:"center"});
+  if(inv.uid) doc.text(`UID: ${inv.uid}`, 14, pageH-6);
+
+  doc.save(`${inv.series}${inv.number}_${inv.issueDate}.pdf`);
+}
+
+// ── Styles ────────────────────────────────────────────────────────────────────
+const S = {
+  app:{ fontFamily:"'Inter','Segoe UI',system-ui,sans-serif", background:T.bg, color:T.text, minHeight:"100vh", fontSize:14 },
+  sidebar:{ width:220, background:T.surface, borderRight:`1px solid ${T.border}`, display:"flex", flexDirection:"column", position:"fixed", top:0, left:0, height:"100vh", zIndex:100 },
+  logo:{ padding:"20px 20px 16px", borderBottom:`1px solid ${T.border}`, fontSize:18, fontWeight:700, color:T.accent, letterSpacing:-0.5 },
+  logoSub:{ fontSize:10, color:T.muted, fontWeight:400, marginTop:2 },
+  navItem:(a)=>({ display:"flex", alignItems:"center", gap:10, padding:"11px 20px", cursor:"pointer", background:a?T.surface2:"transparent", color:a?T.accent:T.muted, borderLeft:`3px solid ${a?T.accent:"transparent"}`, fontSize:13, fontWeight:a?600:400 }),
+  main:{ marginLeft:220, padding:"32px 36px", maxWidth:1100 },
+  card:{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:24, marginBottom:20 },
+  cardTitle:{ fontSize:16, fontWeight:600, marginBottom:18, color:T.text },
+  row:{ display:"flex", gap:16, flexWrap:"wrap" },
+  col:(f=1)=>({ flex:f, minWidth:180 }),
+  label:{ fontSize:12, color:T.muted, marginBottom:5, display:"block", fontWeight:500 },
+  input:{ width:"100%", background:T.surface2, border:`1px solid ${T.border}`, borderRadius:8, padding:"9px 12px", color:T.text, fontSize:13, outline:"none", boxSizing:"border-box" },
+  select:{ width:"100%", background:T.surface2, border:`1px solid ${T.border}`, borderRadius:8, padding:"9px 12px", color:T.text, fontSize:13, outline:"none", boxSizing:"border-box" },
+  btn:(v="primary")=>({ padding:"10px 20px", borderRadius:8, border:"none", cursor:"pointer", fontSize:13, fontWeight:600,
+    background:v==="primary"?T.accent:v==="danger"?T.danger:v==="success"?T.success:T.surface2,
+    color:v==="primary"?T.bg:v==="ghost"?T.muted:T.white }),
+  badge:(c)=>({ display:"inline-block", padding:"2px 8px", borderRadius:20, fontSize:11, fontWeight:600,
+    background:c==="success"?"#00e67622":c==="danger"?"#ff525222":c==="warning"?"#ffb30022":T.surface2,
+    color:c==="success"?T.success:c==="danger"?T.danger:c==="warning"?T.warning:T.muted }),
+  table:{ width:"100%", borderCollapse:"collapse" },
+  th:{ textAlign:"left", padding:"10px 12px", fontSize:11, fontWeight:600, color:T.muted, borderBottom:`1px solid ${T.border}`, textTransform:"uppercase", letterSpacing:0.5 },
+  td:{ padding:"12px 12px", fontSize:13, borderBottom:`1px solid ${T.border}`, verticalAlign:"middle" },
+  kpi:{ background:T.surface2, border:`1px solid ${T.border}`, borderRadius:12, padding:"20px 24px", flex:1, minWidth:160 },
+  toast:(t)=>({ position:"fixed", bottom:24, right:24, zIndex:9999, background:t==="success"?"#00e67611":"#ff525211", border:`1px solid ${t==="success"?T.success:T.danger}`, color:t==="success"?T.success:T.danger, borderRadius:10, padding:"12px 20px", fontSize:13, fontWeight:500 }),
+  divider:{ borderTop:`1px solid ${T.border}`, margin:"20px 0" },
+  hamburger:{ position:"fixed", top:16, left:16, zIndex:200, background:T.surface, border:`1px solid ${T.border}`, borderRadius:8, padding:"8px 10px", cursor:"pointer", color:T.text, fontSize:18 },
+  overlay:{ position:"fixed", inset:0, background:"#00000088", zIndex:99 },
+  authWrap:{ display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh", background:T.bg },
+  authCard:{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:16, padding:40, width:360 },
+};
+
+// ── Auth screen ───────────────────────────────────────────────────────────────
+function AuthScreen({ onSuccess }) {
+  const [mode, setMode]     = useState("login");
+  const [email, setEmail]   = useState("");
+  const [pass, setPass]     = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr]       = useState("");
+  const [msg, setMsg]       = useState("");
+
+  const submit = async () => {
+    if(!supabase) {
+      // Demo mode without Supabase
+      onSuccess({ id:"demo", email:"demo@mydata.app", demo:true });
+      return;
+    }
+    setLoading(true); setErr("");
+    try {
+      let result;
+      if(mode==="login") {
+        result = await supabase.auth.signInWithPassword({ email, password:pass });
+      } else if(mode==="register") {
+        result = await supabase.auth.signUp({ email, password:pass });
+        if(!result.error) { setMsg("Έλεγξε το email σου για επιβεβαίωση!"); return; }
+      } else {
+        result = await supabase.auth.resetPasswordForEmail(email);
+        if(!result.error) { setMsg("Στάλθηκε email επαναφοράς!"); return; }
+      }
+      if(result.error) { setErr(result.error.message); return; }
+      if(result.data?.user) onSuccess(result.data.user);
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <div style={S.authWrap}>
+      <div style={S.authCard}>
+        <div style={{ fontSize:22, fontWeight:700, color:T.accent, marginBottom:4 }}>
+          myDATA<span style={{ color:T.muted }}>·app</span>
+        </div>
+        <div style={{ fontSize:12, color:T.muted, marginBottom:28 }}>Τιμολόγηση & myDATA για ελεύθερους επαγγελματίες</div>
+
+        <div style={{ display:"flex", gap:8, marginBottom:24 }}>
+          {[["login","Σύνδεση"],["register","Εγγραφή"]].map(([m,l])=>(
+            <button key={m} style={{ ...S.btn(mode===m?"primary":"ghost"), flex:1, padding:"8px" }} onClick={()=>{ setMode(m); setErr(""); setMsg(""); }}>{l}</button>
+          ))}
+        </div>
+
+        {msg ? (
+          <div style={{ padding:14, background:"#00e67611", border:`1px solid ${T.success}`, borderRadius:8, color:T.success, fontSize:13 }}>{msg}</div>
+        ) : (
+          <>
+            <label style={S.label}>Email</label>
+            <input style={{ ...S.input, marginBottom:14 }} type="email" placeholder="you@example.com" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} />
+            {mode!=="forgot" && <>
+              <label style={S.label}>Κωδικός</label>
+              <input style={{ ...S.input, marginBottom:20 }} type="password" placeholder="••••••••" value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} />
+            </>}
+            {err && <div style={{ color:T.danger, fontSize:12, marginBottom:14 }}>{err}</div>}
+            <button style={{ ...S.btn("primary"), width:"100%", opacity:loading?0.6:1 }} onClick={submit} disabled={loading}>
+              {loading?"⏳ ...":mode==="login"?"Σύνδεση →":mode==="register"?"Δημιουργία λογαριασμού":"Αποστολή email"}
+            </button>
+            {mode==="login" && (
+              <div style={{ textAlign:"center", marginTop:14 }}>
+                <span style={{ color:T.accent, fontSize:12, cursor:"pointer" }} onClick={()=>setMode("forgot")}>Ξέχασες τον κωδικό;</span>
+              </div>
+            )}
+          </>
+        )}
+
+        {!supabase && (
+          <div style={{ marginTop:16, padding:"10px 12px", background:"#ffb30011", borderRadius:8, fontSize:11, color:T.warning }}>
+            Demo mode — χωρίς Supabase credentials (local storage only)
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Supabase hooks ────────────────────────────────────────────────────────────
+function useSettings(user) {
+  const LOCAL_KEY = "mydata_settings";
+  const INIT = { vatNumber:"", userId:"", subscriptionKey:"", sandbox:true, issuerName:"", issuerAddress:"", nextNumber:1, series:"Α" };
+
+  const [settings, setSettingsState] = useState(() => {
+    try { const s=localStorage.getItem(LOCAL_KEY); return s?JSON.parse(s):INIT; } catch { return INIT; }
+  });
+
+  const setSettings = useCallback(async (val) => {
+    setSettingsState(val);
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(val));
+    if(supabase && user && !user.demo) {
+      await supabase.from("user_settings").upsert({ user_id:user.id, settings:val }, { onConflict:"user_id" });
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if(!supabase || !user || user.demo) return;
+    supabase.from("user_settings").select("settings").eq("user_id",user.id).single()
+      .then(({data}) => { if(data?.settings) { setSettingsState(data.settings); localStorage.setItem(LOCAL_KEY,JSON.stringify(data.settings)); }});
+  }, [user]);
+
+  return [settings, setSettings];
+}
+
+function useInvoices(user) {
+  const LOCAL_KEY = "mydata_invoices";
+  const [invoices, setInvoicesState] = useState(() => {
+    try { const s=localStorage.getItem(LOCAL_KEY); return s?JSON.parse(s):[]; } catch { return []; }
+  });
+  const [dbLoading, setDbLoading] = useState(false);
+
+  const setInvoices = useCallback(async (val) => {
+    const arr = typeof val==="function" ? val(invoices) : val;
+    setInvoicesState(arr);
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(arr));
+  }, [invoices]);
+
+  const addInvoice = useCallback(async (inv) => {
+    const newList = [inv, ...invoices];
+    setInvoicesState(newList);
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(newList));
+    if(supabase && user && !user.demo) {
+      await supabase.from("invoices").insert({
+        user_id:user.id, series:inv.series, number:inv.number,
+        issue_date:inv.issueDate, invoice_type:inv.type,
+        counterpart_name:inv.counterpartName, counterpart_vat:inv.counterpart?.vatNumber,
+        total_net:inv.totalNet, total_vat:inv.totalVat, total_gross:inv.totalGross,
+        status:inv.status, mark:inv.mark, uid:inv.uid,
+        payload:inv,
+      });
+    }
+  }, [invoices, user]);
+
+  useEffect(() => {
+    if(!supabase || !user || user.demo) return;
+    setDbLoading(true);
+    supabase.from("invoices").select("payload").eq("user_id",user.id).order("created_at",{ascending:false})
+      .then(({data}) => {
+        if(data?.length) {
+          const arr = data.map(d=>d.payload);
+          setInvoicesState(arr);
+          localStorage.setItem(LOCAL_KEY,JSON.stringify(arr));
+        }
+        setDbLoading(false);
+      });
+  }, [user]);
+
+  return [invoices, setInvoices, addInvoice, dbLoading];
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
+export default function MyDataApp() {
+  const [user, setUser]       = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [page, setPage]       = useState("dashboard");
+  const [settings, setSettings] = useSettings(user);
+  const [invoices, setInvoices, addInvoice, dbLoading] = useInvoices(user);
+  const [draft, setDraft]     = useState(emptyInvoice());
+  const [toast, setToast]     = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [mobileMenu, setMobile] = useState(false);
+  const [isMobile, setIsMobile] = useState(typeof window!=="undefined"&&window.innerWidth<768);
+
+  // Auth check on mount
+  useEffect(() => {
+    if(!supabase) { setAuthChecked(true); return; }
+    supabase.auth.getSession().then(({data:{session}}) => {
+      if(session?.user) setUser(session.user);
+      setAuthChecked(true);
+    });
+    const {data:{subscription}} = supabase.auth.onAuthStateChange((_,session) => {
+      setUser(session?.user || null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const fn = () => setIsMobile(window.innerWidth<768);
+    window.addEventListener("resize",fn);
+    return ()=>window.removeEventListener("resize",fn);
+  },[]);
+
+  const showToast = (msg,type="success") => {
+    setToast({msg,type});
+    setTimeout(()=>setToast(null),3800);
+  };
+
+  const nav = [
+    {id:"dashboard",icon:"📊",label:"Dashboard"},
+    {id:"new",icon:"📄",label:"Νέο Παραστατικό"},
+    {id:"invoices",icon:"🗂️",label:"Παραστατικά"},
+    {id:"settings",icon:"⚙️",label:"Ρυθμίσεις"},
+  ];
+
+  const navigate = id => { setPage(id); setMobile(false); if(id==="new") setDraft(emptyInvoice()); };
+
+  const calcLine = l => {
+    const vr = VAT_CATS.find(v=>v.value===l.vatCategory)?.rate||0;
+    const net = l.quantity*l.unitPrice;
+    return {...l, netValue:net, vatAmount:net*vr};
+  };
+
+  const updateLine = (idx,field,value) => {
+    const lines = draft.lines.map((l,i)=>i!==idx?l:calcLine({...l,[field]:value}));
+    setDraft({...draft,lines});
+  };
+
+  const totalNet   = draft.lines.reduce((s,l)=>s+l.netValue,0);
+  const totalVat   = draft.lines.reduce((s,l)=>s+l.vatAmount,0);
+  const totalGross = totalNet+totalVat;
+
+  // ── Submit to myDATA ────────────────────────────────────────────────────────
+  const submitToMyData = async () => {
+    if(!settings.vatNumber||!settings.userId||!settings.subscriptionKey) {
+      showToast("Συμπλήρωσε τα στοιχεία σύνδεσης στις Ρυθμίσεις","error"); return;
+    }
+    setLoading(true);
+    try {
+      const number = settings.nextNumber;
+      const xml = buildXML(draft, settings, number);
+      const baseUrl = settings.sandbox ? MYDATA_SANDBOX : MYDATA_PROD;
+      const res = await fetch(`${baseUrl}/SendInvoices`,{
+        method:"POST",
+        headers:{"Content-Type":"application/xml","aade-user-id":settings.userId,"Ocp-Apim-Subscription-Key":settings.subscriptionKey},
+        body:xml,
+      });
+      const text = await res.text();
+      const mark = text.match(/<mark>(\d+)<\/mark>/)?.[1]||null;
+      const uid  = text.match(/<uid>([^<]+)<\/uid>/)?.[1]||null;
+      if(res.ok && mark) {
+        const saved = { ...draft, id:Date.now(), number, series:settings.series, issueDate:today(), mark, uid, totalNet, totalVat, totalGross, status:"sent", counterpartName:draft.counterpart.name };
+        await addInvoice(saved);
+        await setSettings({...settings, nextNumber:number+1});
+        showToast(`✅ Εστάλη! MARK: ${mark}`);
+        setDraft(emptyInvoice());
+        setPage("invoices");
+      } else {
+        const errMsg = text.match(/<message>([^<]+)<\/message>/)?.[1]||"Σφάλμα αποστολής";
+        showToast(errMsg,"error");
+      }
+    } catch(e) { showToast("Σφάλμα δικτύου: "+e.message,"error"); }
+    finally { setLoading(false); }
+  };
+
+  const saveDraft = async () => {
+    const saved = { ...draft, id:Date.now(), number:settings.nextNumber, series:settings.series, issueDate:today(), totalNet, totalVat, totalGross, status:"draft", counterpartName:draft.counterpart.name };
+    await addInvoice(saved);
+    showToast("Αποθηκεύτηκε ως πρόχειρο");
+    setPage("invoices");
+  };
+
+  const signOut = async () => {
+    if(supabase) await supabase.auth.signOut();
+    setUser(null);
+  };
+
+  // KPIs
+  const sentInv  = invoices.filter(i=>i.status==="sent");
+  const thisMonth = sentInv.filter(i=>i.issueDate?.startsWith(today().slice(0,7)));
+  const kpiNet   = thisMonth.reduce((s,i)=>s+(i.totalNet||0),0);
+  const kpiVat   = thisMonth.reduce((s,i)=>s+(i.totalVat||0),0);
+  const kpiGross = thisMonth.reduce((s,i)=>s+(i.totalGross||0),0);
+
+  // ── Not logged in ───────────────────────────────────────────────────────────
+  if(!authChecked) return <div style={{...S.authWrap,color:T.muted}}>Φόρτωση...</div>;
+  if(!user) return <AuthScreen onSuccess={u=>{setUser(u);}} />;
+
+  // ── Sidebar ─────────────────────────────────────────────────────────────────
+  const SidebarEl = () => (
+    <div style={S.sidebar}>
+      <div style={S.logo}>
+        myDATA<span style={{color:T.muted}}>·app</span>
+        <div style={S.logoSub}>Τιμολόγηση & myDATA</div>
+      </div>
+      <div style={{flex:1,paddingTop:8}}>
+        {nav.map(n=>(
+          <div key={n.id} style={S.navItem(page===n.id)} onClick={()=>navigate(n.id)}>
+            <span>{n.icon}</span><span>{n.label}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{padding:"12px 20px",borderTop:`1px solid ${T.border}`}}>
+        <div style={{fontSize:11,color:T.muted}}>{settings.sandbox?"🟡 Sandbox":"🟢 Production"}</div>
+        {settings.vatNumber&&<div style={{fontSize:11,color:T.muted,marginTop:2}}>ΑΦΜ: {settings.vatNumber}</div>}
+        {user.demo&&<div style={{fontSize:11,color:T.warning,marginTop:2}}>Demo mode</div>}
+        <div style={{fontSize:11,color:T.muted,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{user.email}</div>
+        <button style={{...S.btn("ghost"),fontSize:11,padding:"4px 0",marginTop:6,background:"none",border:"none"}} onClick={signOut}>Αποσύνδεση</button>
+      </div>
+    </div>
+  );
+
+  // ── Dashboard ────────────────────────────────────────────────────────────────
+  const Dashboard = () => (
+    <div>
+      <h2 style={{fontSize:22,fontWeight:700,marginBottom:6}}>Dashboard</h2>
+      <div style={{color:T.muted,fontSize:13,marginBottom:24}}>{new Date().toLocaleDateString("el-GR",{month:"long",year:"numeric"})}</div>
+      <div style={{display:"flex",gap:16,flexWrap:"wrap",marginBottom:24}}>
+        {[
+          {label:"Έσοδα μήνα (καθαρό)",val:`€${fmt(kpiNet)}`,color:T.accent},
+          {label:"ΦΠΑ μήνα",val:`€${fmt(kpiVat)}`,color:T.warning},
+          {label:"Σύνολο μήνα",val:`€${fmt(kpiGross)}`,color:T.success},
+          {label:"Παραστατικά μήνα",val:thisMonth.length,color:T.text},
+        ].map(k=>(
+          <div key={k.label} style={S.kpi}>
+            <div style={{fontSize:28,fontWeight:700,color:k.color,marginBottom:4}}>{k.val}</div>
+            <div style={{fontSize:12,color:T.muted}}>{k.label}</div>
+          </div>
+        ))}
+      </div>
+      <div style={S.card}>
+        <div style={S.cardTitle}>Τελευταία παραστατικά</div>
+        {dbLoading ? (
+          <div style={{color:T.muted,textAlign:"center",padding:24}}>⏳ Φόρτωση από cloud...</div>
+        ) : invoices.length===0 ? (
+          <div style={{color:T.muted,textAlign:"center",padding:32}}>
+            Δεν υπάρχουν παραστατικά.<br/>
+            <span style={{color:T.accent,cursor:"pointer"}} onClick={()=>navigate("new")}>Δημιούργησε το πρώτο →</span>
+          </div>
+        ) : (
+          <table style={S.table}>
+            <thead><tr>{["#","Αντισυμβαλλόμενος","Ημ/νία","Σύνολο","Κατάσταση",""].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <tbody>
+              {invoices.slice(0,8).map(inv=>(
+                <tr key={inv.id}>
+                  <td style={{...S.td,color:T.accent,fontWeight:600}}>{inv.series}{inv.number}</td>
+                  <td style={S.td}>{inv.counterpartName||"—"}</td>
+                  <td style={S.td}>{inv.issueDate}</td>
+                  <td style={{...S.td,fontWeight:600}}>€{fmt(inv.totalGross||0)}</td>
+                  <td style={S.td}><span style={S.badge(inv.status==="sent"?"success":"warning")}>{inv.status==="sent"?"✓ myDATA":"Πρόχειρο"}</span></td>
+                  <td style={S.td}><button style={{...S.btn("ghost"),padding:"4px 10px",fontSize:11}} onClick={()=>generatePDF(inv,settings)}>PDF</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {!settings.vatNumber&&(
+        <div style={{...S.card,borderColor:T.warning,background:"#ffb30011"}}>
+          <div style={{color:T.warning,fontWeight:600,marginBottom:8}}>⚠️ Ρύθμιση απαιτείται</div>
+          <div style={{color:T.muted,fontSize:13,marginBottom:12}}>Συμπλήρωσε τα credentials myDATA για να ξεκινήσεις.</div>
+          <button style={S.btn("primary")} onClick={()=>navigate("settings")}>Ρυθμίσεις →</button>
+        </div>
+      )}
+    </div>
+  );
+
+  // ── New Invoice ─────────────────────────────────────────────────────────────
+  const NewInvoice = () => (
+    <div>
+      <h2 style={{fontSize:22,fontWeight:700,marginBottom:24}}>Νέο Παραστατικό</h2>
+
+      <div style={S.card}>
+        <div style={S.cardTitle}>Στοιχεία Παραστατικού</div>
+        <div style={S.row}>
+          <div style={S.col(1.5)}>
+            <label style={S.label}>Τύπος</label>
+            <select style={S.select} value={draft.type} onChange={e=>setDraft({...draft,type:e.target.value})}>
+              {INVOICE_TYPES.map(t=><option key={t.value} value={t.value}>{t.label}</option>)}
+            </select>
+          </div>
+          <div style={S.col(0.5)}>
+            <label style={S.label}>Σειρά</label>
+            <input style={S.input} value={draft.series} onChange={e=>setDraft({...draft,series:e.target.value})} />
+          </div>
+          <div style={S.col(0.5)}>
+            <label style={S.label}>Α/Α</label>
+            <input style={{...S.input,color:T.muted}} value={settings.nextNumber} readOnly />
+          </div>
+          <div style={S.col(0.8)}>
+            <label style={S.label}>Ημερομηνία</label>
+            <input type="date" style={S.input} value={draft.issueDate} onChange={e=>setDraft({...draft,issueDate:e.target.value})} />
+          </div>
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={S.cardTitle}>Στοιχεία Αντισυμβαλλόμενου</div>
+        <div style={S.row}>
+          <div style={S.col(2)}>
+            <label style={S.label}>Επωνυμία / Ονοματεπώνυμο</label>
+            <input style={S.input} placeholder="π.χ. Ιωάννης Παπαδόπουλος" value={draft.counterpart.name} onChange={e=>setDraft({...draft,counterpart:{...draft.counterpart,name:e.target.value}})} />
+          </div>
+          <div style={S.col()}>
+            <label style={S.label}>ΑΦΜ</label>
+            <input style={S.input} placeholder="123456789" value={draft.counterpart.vatNumber} onChange={e=>setDraft({...draft,counterpart:{...draft.counterpart,vatNumber:e.target.value}})} />
+          </div>
+          <div style={S.col(0.5)}>
+            <label style={S.label}>Χώρα</label>
+            <input style={S.input} value={draft.counterpart.country} onChange={e=>setDraft({...draft,counterpart:{...draft.counterpart,country:e.target.value}})} />
+          </div>
+        </div>
+        <div style={{...S.row,marginTop:16}}>
+          <div style={S.col(2)}>
+            <label style={S.label}>Διεύθυνση</label>
+            <input style={S.input} placeholder="Οδός, Αριθμός" value={draft.counterpart.address} onChange={e=>setDraft({...draft,counterpart:{...draft.counterpart,address:e.target.value}})} />
+          </div>
+          <div style={S.col()}>
+            <label style={S.label}>Πόλη</label>
+            <input style={S.input} value={draft.counterpart.city} onChange={e=>setDraft({...draft,counterpart:{...draft.counterpart,city:e.target.value}})} />
+          </div>
+          <div style={S.col()}>
+            <label style={S.label}>Τρόπος Πληρωμής</label>
+            <select style={S.select} value={draft.paymentMethod} onChange={e=>setDraft({...draft,paymentMethod:Number(e.target.value)})}>
+              {PAYMENT_METHODS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={S.cardTitle}>Γραμμές</div>
+          <button style={S.btn("ghost")} onClick={()=>setDraft({...draft,lines:[...draft.lines,emptyLine()]})}>+ Γραμμή</button>
+        </div>
+        <div style={{overflowX:"auto"}}>
+          <table style={{...S.table,minWidth:700}}>
+            <thead><tr>{["Περιγραφή","Ποσ.","Τιμή","ΦΠΑ","Καθαρό","ΦΠΑ €",""].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <tbody>
+              {draft.lines.map((l,i)=>(
+                <tr key={i}>
+                  <td style={S.td}><input style={{...S.input,minWidth:150}} placeholder="Περιγραφή υπηρεσίας" value={l.description} onChange={e=>updateLine(i,"description",e.target.value)} /></td>
+                  <td style={S.td}><input type="number" style={{...S.input,width:65}} value={l.quantity} onChange={e=>updateLine(i,"quantity",Number(e.target.value))} /></td>
+                  <td style={S.td}><input type="number" style={{...S.input,width:90}} value={l.unitPrice} onChange={e=>updateLine(i,"unitPrice",Number(e.target.value))} /></td>
+                  <td style={S.td}>
+                    <select style={{...S.select,width:85}} value={l.vatCategory} onChange={e=>updateLine(i,"vatCategory",Number(e.target.value))}>
+                      {VAT_CATS.map(v=><option key={v.value} value={v.value}>{v.label}</option>)}
+                    </select>
+                  </td>
+                  <td style={{...S.td,color:T.accent,fontWeight:600}}>€{fmt(l.netValue)}</td>
+                  <td style={S.td}>€{fmt(l.vatAmount)}</td>
+                  <td style={S.td}>{draft.lines.length>1&&<button style={{background:"none",border:"none",color:T.danger,cursor:"pointer",fontSize:16}} onClick={()=>setDraft({...draft,lines:draft.lines.filter((_,j)=>j!==i)})}>✕</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={S.divider}/>
+        <div style={{display:"flex",justifyContent:"flex-end"}}>
+          <div style={{textAlign:"right",minWidth:220}}>
+            {[["Καθαρή αξία:",`€${fmt(totalNet)}`],["ΦΠΑ:",`€${fmt(totalVat)}`]].map(([l,v])=>(
+              <div key={l} style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                <span style={{color:T.muted}}>{l}</span><span style={{fontWeight:600}}>{v}</span>
+              </div>
+            ))}
+            <div style={{...S.divider,margin:"8px 0"}}/>
+            <div style={{display:"flex",justifyContent:"space-between"}}>
+              <span style={{color:T.muted,fontWeight:600}}>Σύνολο:</span>
+              <span style={{fontWeight:700,fontSize:20,color:T.accent}}>€{fmt(totalGross)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={S.card}>
+        <label style={S.label}>Παρατηρήσεις</label>
+        <textarea style={{...S.input,height:60,resize:"vertical",fontFamily:"inherit"}} placeholder="π.χ. Εξόφληση εντός 30 ημερών" value={draft.notes} onChange={e=>setDraft({...draft,notes:e.target.value})} />
+      </div>
+
+      <div style={{display:"flex",gap:12,justifyContent:"flex-end"}}>
+        <button style={S.btn("ghost")} onClick={saveDraft}>Αποθήκευση πρόχειρο</button>
+        <button style={{...S.btn("primary"),opacity:loading?0.6:1,minWidth:190}} onClick={submitToMyData} disabled={loading}>
+          {loading?"⏳ Αποστολή...":"📤 Αποστολή στο myDATA"}
+        </button>
+      </div>
+    </div>
+  );
+
+  // ── Invoice list ────────────────────────────────────────────────────────────
+  const InvoicesList = () => {
+    const [filter,setFilter] = useState("all");
+    const filtered = filter==="all"?invoices:invoices.filter(i=>i.status===filter);
+    return (
+      <div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+          <h2 style={{fontSize:22,fontWeight:700}}>Παραστατικά</h2>
+          <button style={S.btn("primary")} onClick={()=>navigate("new")}>+ Νέο</button>
+        </div>
+        <div style={{display:"flex",gap:8,marginBottom:20}}>
+          {[["all","Όλα"],["sent","Εστάλησαν"],["draft","Πρόχειρα"]].map(([v,l])=>(
+            <button key={v} style={{...S.btn(filter===v?"primary":"ghost"),padding:"7px 16px"}} onClick={()=>setFilter(v)}>{l}</button>
+          ))}
+        </div>
+        <div style={S.card}>
+          {filtered.length===0 ? (
+            <div style={{color:T.muted,textAlign:"center",padding:40}}>Δεν υπάρχουν παραστατικά</div>
+          ) : (
+            <div style={{overflowX:"auto"}}>
+              <table style={{...S.table,minWidth:750}}>
+                <thead><tr>{["#","Τύπος","Αντισυμβαλλόμενος","Ημ/νία","Καθαρό","ΦΠΑ","Σύνολο","MARK","Status",""].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {filtered.map(inv=>(
+                    <tr key={inv.id}>
+                      <td style={{...S.td,color:T.accent,fontWeight:600}}>{inv.series}{inv.number}</td>
+                      <td style={{...S.td,color:T.muted,fontSize:11}}>{inv.type}</td>
+                      <td style={S.td}>{inv.counterpartName||"—"}</td>
+                      <td style={S.td}>{inv.issueDate}</td>
+                      <td style={S.td}>€{fmt(inv.totalNet||0)}</td>
+                      <td style={S.td}>€{fmt(inv.totalVat||0)}</td>
+                      <td style={{...S.td,fontWeight:700}}>€{fmt(inv.totalGross||0)}</td>
+                      <td style={{...S.td,fontFamily:"monospace",fontSize:10,color:T.muted}}>{inv.mark||"—"}</td>
+                      <td style={S.td}><span style={S.badge(inv.status==="sent"?"success":"warning")}>{inv.status==="sent"?"✓ myDATA":"Πρόχειρο"}</span></td>
+                      <td style={S.td}><button style={{...S.btn("ghost"),padding:"4px 12px",fontSize:12}} onClick={()=>generatePDF(inv,settings)}>📄 PDF</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ── Settings ────────────────────────────────────────────────────────────────
+  const Settings = () => {
+    const [local,setLocal] = useState(settings);
+    const save = async () => { await setSettings(local); showToast("Αποθηκεύτηκαν"); };
+    return (
+      <div>
+        <h2 style={{fontSize:22,fontWeight:700,marginBottom:24}}>Ρυθμίσεις</h2>
+        <div style={S.card}>
+          <div style={S.cardTitle}>🔑 Στοιχεία Επαγγελματία</div>
+          <div style={S.row}>
+            <div style={S.col()}><label style={S.label}>Επωνυμία / Ονοματεπώνυμο</label><input style={S.input} value={local.issuerName} onChange={e=>setLocal({...local,issuerName:e.target.value})} /></div>
+            <div style={S.col()}><label style={S.label}>ΑΦΜ</label><input style={S.input} value={local.vatNumber} onChange={e=>setLocal({...local,vatNumber:e.target.value})} /></div>
+          </div>
+          <div style={{...S.row,marginTop:16}}>
+            <div style={S.col(2)}><label style={S.label}>Διεύθυνση</label><input style={S.input} value={local.issuerAddress} onChange={e=>setLocal({...local,issuerAddress:e.target.value})} /></div>
+          </div>
+        </div>
+        <div style={S.card}>
+          <div style={S.cardTitle}>🌐 myDATA API Credentials</div>
+          <div style={{padding:"10px 14px",background:"#ffb30011",border:`1px solid ${T.warning}`,borderRadius:8,fontSize:12,color:T.warning,marginBottom:16}}>
+            💡 Βρες τα credentials στο <strong>mydata.aade.gr</strong> → Ρυθμίσεις → Εφαρμογή myDATA
+          </div>
+          <div style={S.row}>
+            <div style={S.col()}><label style={S.label}>aade-user-id</label><input style={S.input} value={local.userId} onChange={e=>setLocal({...local,userId:e.target.value})} /></div>
+            <div style={S.col()}><label style={S.label}>Subscription Key</label><input style={{...S.input,fontFamily:"monospace"}} type="password" value={local.subscriptionKey} onChange={e=>setLocal({...local,subscriptionKey:e.target.value})} /></div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginTop:14}}>
+            <input type="checkbox" id="sb" checked={local.sandbox} onChange={e=>setLocal({...local,sandbox:e.target.checked})} />
+            <label htmlFor="sb" style={{color:T.muted,fontSize:13,cursor:"pointer"}}>Sandbox mode (δοκιμαστικό περιβάλλον ΑΑΔΕ)</label>
+          </div>
+        </div>
+        <div style={S.card}>
+          <div style={S.cardTitle}>📋 Αρίθμηση</div>
+          <div style={S.row}>
+            <div style={S.col(0.5)}><label style={S.label}>Σειρά</label><input style={S.input} value={local.series} onChange={e=>setLocal({...local,series:e.target.value})} /></div>
+            <div style={S.col(0.5)}><label style={S.label}>Επόμενος Α/Α</label><input type="number" style={S.input} value={local.nextNumber} onChange={e=>setLocal({...local,nextNumber:Number(e.target.value)})} /></div>
+          </div>
+        </div>
+        {supabase&&!user.demo&&(
+          <div style={{...S.card,borderColor:"#00e67644"}}>
+            <div style={{color:T.success,fontWeight:600,marginBottom:6}}>☁️ Cloud Sync ενεργό</div>
+            <div style={{fontSize:12,color:T.muted}}>Τα δεδομένα σου αποθηκεύονται στο Supabase. Λογαριασμός: <strong style={{color:T.text}}>{user.email}</strong></div>
+          </div>
+        )}
+        <div style={{display:"flex",justifyContent:"flex-end",gap:12}}>
+          <button style={S.btn("primary")} onClick={save}>Αποθήκευση</button>
+        </div>
+      </div>
+    );
+  };
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+  return (
+    <div style={S.app}>
+      {isMobile&&<button style={S.hamburger} onClick={()=>setMobile(!mobileMenu)}>☰</button>}
+      {isMobile&&mobileMenu&&<div style={S.overlay} onClick={()=>setMobile(false)}/>}
+      {(!isMobile||mobileMenu)&&<SidebarEl/>}
+      <div style={isMobile?{...S.main,marginLeft:0,paddingTop:60}:S.main}>
+        {page==="dashboard"&&<Dashboard/>}
+        {page==="new"&&<NewInvoice/>}
+        {page==="invoices"&&<InvoicesList/>}
+        {page==="settings"&&<Settings/>}
+      </div>
+      {toast&&<div style={S.toast(toast.type==="success"?"success":"error")}>{toast.msg}</div>}
+    </div>
+  );
+}
