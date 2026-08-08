@@ -343,24 +343,69 @@ function App(){
     if(!cfg.gsisUser||!cfg.gsisPass){ setGsisErr("Συμπλήρωσε ΓΓΠΣ credentials στις Ρυθμίσεις"); setGsisStatus("err"); return; }
     setGsisStatus("loading"); setGsisErr(""); setGsisInfo(null);
     try {
-      const res = await fetch("/.netlify/functions/gsis-lookup",{
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({ afm, calledByAfm:cfg.afm, username:cfg.gsisUser, password:cfg.gsisPass }),
+      const soapEnv = `<?xml version="1.0" encoding="UTF-8"?>
+<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" xmlns:ns="http://gr/gsis/rgwspublic/RgWsPublic.wsdl">
+  <env:Header>
+    <ns:RgWsPublicBasicAuth>
+      <ns:UserId>${cfg.gsisUser}</ns:UserId>
+      <ns:UserPassword>${cfg.gsisPass}</ns:UserPassword>
+    </ns:RgWsPublicBasicAuth>
+  </env:Header>
+  <env:Body>
+    <ns:rgWsPublicAfmMethod>
+      <ns:INPUT_REC>
+        <ns:afm_called_by>${cfg.afm||cfg.gsisUser}</ns:afm_called_by>
+        <ns:afm_called_for>${afm}</ns:afm_called_for>
+      </ns:INPUT_REC>
+    </ns:rgWsPublicAfmMethod>
+  </env:Body>
+</env:Envelope>`;
+
+      // Use allorigins.win as CORS proxy to bypass browser CORS restrictions
+      const targetUrl = "https://www1.gsis.gr/wsaade/RgWsPublic2/RgWsPublic2";
+      const proxyUrl  = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+
+      const res = await fetch(proxyUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/soap+xml;charset=UTF-8" },
+        body: soapEnv,
       });
-      const json = await res.json();
-      if(json.error){ setGsisErr(json.error); setGsisStatus("err"); return; }
-      const d = json.data;
+
+      const xml = await res.text();
+
+      const get = (tag) => {
+        const m = xml.match(new RegExp(`<[^:>]*:?${tag}[^>]*>([^<]*)<`));
+        return m ? m[1].trim() : "";
+      };
+
+      const errCode = get("error_code")||get("pError_code");
+      if(errCode && errCode!=="0"){
+        setGsisErr(get("error_descr")||get("pError_descr")||`Σφάλμα ΓΓΠΣ (κωδ. ${errCode})`);
+        setGsisStatus("err"); return;
+      }
+
+      const odos     = get("odos");
+      const arithmos = get("arithmos");
+      const address  = [odos, arithmos].filter(Boolean).join(" ");
+
+      const d = {
+        name:       get("onomasia") || [get("eponymo"),get("onoma"),get("patronymo")].filter(Boolean).join(" "),
+        address,
+        city:       get("poli")||get("perifereia"),
+        postalCode: get("tk"),
+        doy:        get("doy_descr")||get("doy"),
+        activity:   get("kad_descr"),
+        deactivated: get("deactivate_flag")==="1",
+      };
+
       setGsisInfo(d);
       setGsisStatus("ok");
-      // Autofill counterpart fields
       setDraft(prev=>({...prev, cp:{
         ...prev.cp,
-        name:    d.name || d.fullName || prev.cp.name,
+        name:    d.name || prev.cp.name,
         addr:    d.address || prev.cp.addr,
         city:    d.city || prev.cp.city,
         country: "GR",
-        doy:     d.doy || "",
       }}));
     } catch(e){ setGsisErr("Σφάλμα σύνδεσης: "+e.message); setGsisStatus("err"); }
   };
@@ -577,12 +622,12 @@ function App(){
               <input style={{...css.inp,flex:1}} placeholder="123456789" value={draft.cp.afm}
                 onChange={e=>{setDraft({...draft,cp:{...draft.cp,afm:e.target.value}});setGsisStatus(null);}}
                 onKeyDown={e=>e.key==="Enter"&&lookupGsis()}/>
-              <button style={{...css.btn(gsisStatus==="ok"?"success":"primary"),padding:"9px 12px",fontSize:12,whiteSpace:"nowrap",opacity:(!cfg.gsisUser||!cfg.gsisPass)?0.4:1}}
-                onClick={lookupGsis} disabled={!cfg.gsisUser||!cfg.gsisPass||gsisStatus==="loading"} title={!cfg.gsisUser?"Συμπλήρωσε ΓΓΠΣ credentials στις Ρυθμίσεις":""}>
-                {gsisStatus==="loading"?"⏳":"🔍 ΓΓΠΣ"}
+              <button style={{...css.btn(gsisStatus==="ok"?"success":"primary"),padding:"9px 12px",fontSize:12,whiteSpace:"nowrap",opacity:gsisStatus==="loading"?0.6:1}}
+                onClick={lookupGsis} disabled={gsisStatus==="loading"}>
+                {gsisStatus==="loading"?"⏳ ...":"🔍 ΓΓΠΣ"}
               </button>
             </div>
-            {!cfg.gsisUser&&<div style={{fontSize:10,color:T.mut,marginTop:4}}>Πρόσθεσε ΓΓΠΣ credentials στις Ρυθμίσεις</div>}
+            {!cfg.gsisUser&&<div style={{fontSize:10,color:T.war,marginTop:4}}>⚠️ Συμπλήρωσε ΓΓΠΣ credentials στις Ρυθμίσεις για αναζήτηση</div>}
           </div>
           <div style={css.col(0.5)}><label style={css.lbl}>Χώρα</label><input style={css.inp} value={draft.cp.country} onChange={e=>setDraft({...draft,cp:{...draft.cp,country:e.target.value}})}/></div>
         </div>
