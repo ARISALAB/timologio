@@ -326,13 +326,44 @@ function App(){
   const [user,setUser]       = useState(null);
   const [authOk,setAuthOk]   = useState(false);
   const [page,setPage]       = useState("dashboard");
-  const [cfg,setCfgState]    = useState(()=>lsGet("myd_cfg",{name:"",afm:"",addr:"",userId:"",subKey:"",sandbox:true,nextNum:1,series:"Α"}));
+  const [cfg,setCfgState]    = useState(()=>lsGet("myd_cfg",{name:"",afm:"",addr:"",userId:"",subKey:"",sandbox:true,nextNum:1,series:"Α",gsisUser:"",gsisPass:""}));
   const [invoices,setInvState]= useState(()=>lsGet("myd_inv",[]));
   const [draft,setDraft]     = useState(emptyInv());
   const [toast,setToast]     = useState(null);
   const [loading,setLoading] = useState(false);
   const [mobMenu,setMob]     = useState(false);
   const [isMob,setIsMob]     = useState(window.innerWidth<768);
+  const [gsisStatus,setGsisStatus] = useState(null); // null | "loading" | "ok" | "err"
+  const [gsisErr,setGsisErr]       = useState("");
+  const [gsisInfo,setGsisInfo]     = useState(null);
+
+  const lookupGsis = async () => {
+    const afm = draft.cp.afm?.trim();
+    if(!afm||afm.length<9){ setGsisErr("Εισάγετε έγκυρο ΑΦΜ (9 ψηφία)"); setGsisStatus("err"); return; }
+    if(!cfg.gsisUser||!cfg.gsisPass){ setGsisErr("Συμπλήρωσε ΓΓΠΣ credentials στις Ρυθμίσεις"); setGsisStatus("err"); return; }
+    setGsisStatus("loading"); setGsisErr(""); setGsisInfo(null);
+    try {
+      const res = await fetch("/.netlify/functions/gsis-lookup",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({ afm, calledByAfm:cfg.afm, username:cfg.gsisUser, password:cfg.gsisPass }),
+      });
+      const json = await res.json();
+      if(json.error){ setGsisErr(json.error); setGsisStatus("err"); return; }
+      const d = json.data;
+      setGsisInfo(d);
+      setGsisStatus("ok");
+      // Autofill counterpart fields
+      setDraft(prev=>({...prev, cp:{
+        ...prev.cp,
+        name:    d.name || d.fullName || prev.cp.name,
+        addr:    d.address || prev.cp.addr,
+        city:    d.city || prev.cp.city,
+        country: "GR",
+        doy:     d.doy || "",
+      }}));
+    } catch(e){ setGsisErr("Σφάλμα σύνδεσης: "+e.message); setGsisStatus("err"); }
+  };
 
   // Responsive
   useEffect(()=>{
@@ -382,7 +413,7 @@ function App(){
 
   const toast$ = (msg,t="s")=>{ setToast({msg,t}); setTimeout(()=>setToast(null),3600); };
 
-  const go = pg => { setPage(pg); setMob(false); if(pg==="new") setDraft(emptyInv()); };
+  const go = pg => { setPage(pg); setMob(false); if(pg==="new"){ setDraft(emptyInv()); setGsisStatus(null); setGsisErr(""); setGsisInfo(null); } };
   const signOut = async()=>{ if(sb) await sb.auth.signOut(); setUser(null); };
 
   // Calcs
@@ -532,12 +563,34 @@ function App(){
       </div>
 
       <div style={css.card}>
-        <div style={css.title}>Αντισυμβαλλόμενος</div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <div style={css.title}>Αντισυμβαλλόμενος</div>
+          {gsisStatus==="ok"&&<span style={{fontSize:12,color:T.suc,fontWeight:600}}>✓ Βρέθηκε από ΓΓΠΣ</span>}
+          {gsisStatus==="err"&&<span style={{fontSize:12,color:T.dan}}>{gsisErr}</span>}
+          {gsisStatus==="loading"&&<span style={{fontSize:12,color:T.mut}}>⏳ Αναζήτηση ΓΓΠΣ...</span>}
+        </div>
         <div style={css.row}>
           <div style={css.col(2)}><label style={css.lbl}>Επωνυμία / Ονοματεπώνυμο</label><input style={css.inp} placeholder="π.χ. Ιωάννης Παπαδόπουλος" value={draft.cp.name} onChange={e=>setDraft({...draft,cp:{...draft.cp,name:e.target.value}})}/></div>
-          <div style={css.col()}><label style={css.lbl}>ΑΦΜ</label><input style={css.inp} placeholder="123456789" value={draft.cp.afm} onChange={e=>setDraft({...draft,cp:{...draft.cp,afm:e.target.value}})}/></div>
+          <div style={css.col()}>
+            <label style={css.lbl}>ΑΦΜ</label>
+            <div style={{display:"flex",gap:6}}>
+              <input style={{...css.inp,flex:1}} placeholder="123456789" value={draft.cp.afm}
+                onChange={e=>{setDraft({...draft,cp:{...draft.cp,afm:e.target.value}});setGsisStatus(null);}}
+                onKeyDown={e=>e.key==="Enter"&&lookupGsis()}/>
+              <button style={{...css.btn(gsisStatus==="ok"?"success":"primary"),padding:"9px 12px",fontSize:12,whiteSpace:"nowrap",opacity:(!cfg.gsisUser||!cfg.gsisPass)?0.4:1}}
+                onClick={lookupGsis} disabled={!cfg.gsisUser||!cfg.gsisPass||gsisStatus==="loading"} title={!cfg.gsisUser?"Συμπλήρωσε ΓΓΠΣ credentials στις Ρυθμίσεις":""}>
+                {gsisStatus==="loading"?"⏳":"🔍 ΓΓΠΣ"}
+              </button>
+            </div>
+            {!cfg.gsisUser&&<div style={{fontSize:10,color:T.mut,marginTop:4}}>Πρόσθεσε ΓΓΠΣ credentials στις Ρυθμίσεις</div>}
+          </div>
           <div style={css.col(0.5)}><label style={css.lbl}>Χώρα</label><input style={css.inp} value={draft.cp.country} onChange={e=>setDraft({...draft,cp:{...draft.cp,country:e.target.value}})}/></div>
         </div>
+        {gsisInfo&&<div style={{marginTop:12,padding:"10px 14px",background:"#00e67611",border:`1px solid ${T.suc}44`,borderRadius:8,fontSize:12,color:T.mut}}>
+          <span style={{color:T.suc,fontWeight:600}}>ΓΓΠΣ: </span>
+          {gsisInfo.name} {gsisInfo.doy&&`· ΔΟΥ: ${gsisInfo.doy}`} {gsisInfo.activity&&`· ${gsisInfo.activity}`}
+          {gsisInfo.deactivated&&<span style={{color:T.dan,marginLeft:8}}>⚠️ ΑΝΕΝΕΡΓΟ ΑΦΜ</span>}
+        </div>}
         <div style={{...css.row,marginTop:14}}>
           <div style={css.col(2)}><label style={css.lbl}>Διεύθυνση</label><input style={css.inp} placeholder="Οδός, Αριθμός" value={draft.cp.addr} onChange={e=>setDraft({...draft,cp:{...draft.cp,addr:e.target.value}})}/></div>
           <div style={css.col()}><label style={css.lbl}>Πόλη</label><input style={css.inp} value={draft.cp.city} onChange={e=>setDraft({...draft,cp:{...draft.cp,city:e.target.value}})}/></div>
@@ -677,6 +730,17 @@ function App(){
           <div style={{display:"flex",alignItems:"center",gap:10,marginTop:14}}>
             <input type="checkbox" id="sb" checked={lc.sandbox} onChange={e=>setLc({...lc,sandbox:e.target.checked})}/>
             <label htmlFor="sb" style={{color:T.mut,fontSize:13,cursor:"pointer"}}>Sandbox mode (δοκιμαστικό περιβάλλον ΑΑΔΕ)</label>
+          </div>
+        </div>
+        <div style={css.card}>
+          <div style={css.title}>🏛️ ΓΓΠΣ — Αναζήτηση ΑΦΜ</div></div>
+          <div style={{padding:"10px 14px",background:"#00c6ff11",border:`1px solid ${T.acc}44`,borderRadius:8,fontSize:12,color:T.mut,marginBottom:16}}>
+            💡 Χρειάζονται <strong style={{color:T.txt}}>ειδικοί κωδικοί ΓΓΠΣ</strong> (όχι οι κανονικοί TAXISnet κωδικοί).
+            Δημιούργησέ τους στο <a href="https://www1.gsis.gr/webtax/faces/jsf/common/mainMenu.xhtml" target="_blank" style={{color:T.acc}}>gsis.gr</a> → Αναζήτηση Βασικών Στοιχείων → Διαχείριση Ειδικών Κωδικών.
+          </div>
+          <div style={css.row}>
+            <div style={css.col()}><label style={css.lbl}>ΓΓΠΣ Username</label><input style={css.inp} placeholder="ειδικός κωδικός ΓΓΠΣ" value={lc.gsisUser} onChange={e=>setLc({...lc,gsisUser:e.target.value})}/></div>
+            <div style={css.col()}><label style={css.lbl}>ΓΓΠΣ Password</label><input style={{...css.inp,fontFamily:"monospace"}} type="password" placeholder="••••••••" value={lc.gsisPass} onChange={e=>setLc({...lc,gsisPass:e.target.value})}/></div>
           </div>
         </div>
         <div style={css.card}>
