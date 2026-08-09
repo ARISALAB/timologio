@@ -545,7 +545,7 @@ function App(){
   const saveCfg=(val,sync=true)=>{setCfgRaw(val);lsSet("myd_cfg",val);if(sync&&sb&&user&&!user.demo)sb.from("user_settings").upsert({user_id:user.id,settings:val},{onConflict:"user_id"});};
   const addInv=async(inv)=>{const a=[inv,...invoices];setInvs(a);lsSet("myd_inv",a);if(sb&&user&&!user.demo)await sb.from("invoices").insert({user_id:user.id,series:inv.series,number:inv.number,issue_date:inv.date,invoice_type:inv.type,counterpart_name:inv.cp?.name,counterpart_vat:inv.cp?.afm,total_net:inv.totalNet,total_vat:inv.totalVat,total_gross:inv.totalGross,status:inv.status,mark:inv.mark,uid:inv.invUid,payload:inv});};
   const toast$=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),3800);};
-  const go=pg=>{setPage(pg);setMob(false);if(pg==="new"){setGsis({status:null,err:"",info:null});}};  const signOut=async()=>{if(sb)await sb.auth.signOut();setUser(null);};
+  const go=pg=>{setPage(pg);setMob(false);if(pg==="new"){setGsis({status:null,err:"",info:null});}};
 
 
   const lookupGsis=async(afmParam)=>{
