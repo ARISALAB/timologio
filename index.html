@@ -28,7 +28,7 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef, useCallback } = React;
 
 const SUPABASE_URL = "";
 const SUPABASE_KEY = "";
@@ -533,8 +533,13 @@ function App(){
   );
 
   // ── NEW INVOICE ────────────────────────────────────────────────────────────────
-  const NewInvoice=()=>(
-    <div>
+  const NewInvoice=()=>{
+    const [cp,setCp]=useState(()=>draft.cp);
+    const updCp=useCallback((field,val)=>{
+      setCp(prev=>{const u={...prev,[field]:val};setDraft(d=>({...d,cp:u}));return u;});
+    },[]);
+    useEffect(()=>{setCp(draft.cp);},[draft.cp.name,draft.cp.addr,draft.cp.city,draft.cp.afm]);
+    return (<div>
       <div style={{marginBottom:24}}>
         <h1 style={{fontSize:24,fontWeight:700,color:C.text}}>Νέο Παραστατικό</h1>
       </div>
@@ -574,13 +579,13 @@ function App(){
         <div style={row}>
           <div style={col(2)}>
             <label style={lbl}>Επωνυμία / Ονοματεπώνυμο</label>
-            <input style={inp} placeholder="π.χ. Ιωάννης Παπαδόπουλος" value={draft.cp.name} onChange={e=>setDraft({...draft,cp:{...draft.cp,name:e.target.value}})}/>
+            <input style={inp} placeholder="π.χ. Ιωάννης Παπαδόπουλος" value={cp.name} onChange={e=>updCp("name",e.target.value)}/>
           </div>
           <div style={col()}>
             <label style={lbl}>ΑΦΜ</label>
             <div style={{display:"flex",gap:8}}>
-              <input style={{...inp,flex:1}} placeholder="123456789" value={draft.cp.afm}
-                onChange={e=>{setDraft({...draft,cp:{...draft.cp,afm:e.target.value}});setGsis({status:null,err:"",info:null});}}
+              <input style={{...inp,flex:1}} placeholder="123456789" value={cp.afm}
+                onChange={e=>updCp("afm",e.target.value)}
                 onKeyDown={e=>e.key==="Enter"&&lookupGsis()}/>
               <button style={{...btn("secondary"),padding:"9px 14px",whiteSpace:"nowrap",fontSize:13,opacity:gsis.status==="loading"?.6:1}}
                 onClick={lookupGsis} disabled={gsis.status==="loading"}>
@@ -590,7 +595,7 @@ function App(){
           </div>
           <div style={col(.5)}>
             <label style={lbl}>Χώρα</label>
-            <input style={inp} value={draft.cp.country} onChange={e=>setDraft({...draft,cp:{...draft.cp,country:e.target.value}})}/>
+            <input style={inp} value={cp.country} onChange={e=>updCp("country",e.target.value)}/>
           </div>
         </div>
 
@@ -606,11 +611,11 @@ function App(){
         <div style={{...row,marginTop:16}}>
           <div style={col(2)}>
             <label style={lbl}>Διεύθυνση</label>
-            <input style={inp} placeholder="Οδός, Αριθμός" value={draft.cp.addr} onChange={e=>setDraft({...draft,cp:{...draft.cp,addr:e.target.value}})}/>
+            <input style={inp} placeholder="Οδός, Αριθμός" value={cp.addr} onChange={e=>updCp("addr",e.target.value)}/>
           </div>
           <div style={col()}>
             <label style={lbl}>Πόλη</label>
-            <input style={inp} value={draft.cp.city} onChange={e=>setDraft({...draft,cp:{...draft.cp,city:e.target.value}})}/>
+            <input style={inp} value={cp.city} onChange={e=>updCp("city",e.target.value)}/>
           </div>
           <div style={col()}>
             <label style={lbl}>Τρόπος Πληρωμής</label>
@@ -679,11 +684,11 @@ function App(){
         </button>
       </div>
     </div>
-  );
+    );
+  };
 
   // ── INVOICES LIST ──────────────────────────────────────────────────────────────
-  const InvList=()=>{
-    const [flt,setFlt]=useState("all");
+  const InvList=()=>{\n    const [flt,setFlt]=useState("all");
     const list=flt==="all"?invoices:invoices.filter(i=>i.status===flt);
     return(
       <div>
