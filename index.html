@@ -331,7 +331,7 @@ function App(){
   const [user,setUser]     = useState(null);
   const [authOk,setAuthOk] = useState(false);
   const [page,setPage]     = useState("dashboard");
-  const [cfg,setCfgRaw]    = useState(()=>lsGet("myd_cfg",{name:"",afm:"",addr:"",userId:"",subKey:"",sandbox:true,nextNum:1,series:"Α"}));
+  const [cfg,setCfgRaw]    = useState(()=>lsGet("myd_cfg",{name:"",afm:"",addr:"",nextNum:1,series:"Α"}));
   const [invoices,setInvs] = useState(()=>lsGet("myd_inv",[]));
   const [draft,setDraft]   = useState(emptyInv());
   const [toast,setToast]   = useState(null);
@@ -385,22 +385,26 @@ function App(){
   };
 
   const submitMyData=async()=>{
-    if(!cfg.afm||!cfg.userId||!cfg.subKey){toast$("Συμπλήρωσε τα credentials στις Ρυθμίσεις","err");return;}
+    if(!cfg.afm){toast$("Συμπλήρωσε το ΑΦΜ σου στις Ρυθμίσεις","err");return;}
     setLoad(true);
     try{
       const num=cfg.nextNum;
       const xml=buildXML(draft,cfg,num);
-      const url=(cfg.sandbox?MYDATA_SANDBOX:MYDATA_PROD)+"/SendInvoices";
-      const res=await fetch(url,{method:"POST",headers:{"Content-Type":"application/xml","aade-user-id":cfg.userId,"Ocp-Apim-Subscription-Key":cfg.subKey},body:xml});
-      const txt=await res.text();
-      const mark=txt.match(/<mark>(\d+)<\/mark>/)?.[1]||null;
-      const invUid=txt.match(/<uid>([^<]+)<\/uid>/)?.[1]||null;
-      if(res.ok&&mark){
+      // Στέλνει μέσω Netlify Function — τα myDATA credentials είναι κρυμμένα στον server
+      const res=await fetch("/.netlify/functions/mydata-send",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({xml}),
+      });
+      const json=await res.json();
+      if(json.error){toast$(json.error,"err");return;}
+      const mark=json.mark; const invUid=json.uid;
+      if(mark){
         const saved={...draft,id:Date.now(),number:num,issueDate:draft.date,mark,invUid,totalNet,totalVat,totalGross,status:"sent",cpName:draft.cp.name};
         await addInv(saved);saveCfg({...cfg,nextNum:num+1});
         toast$(`Εστάλη επιτυχώς! MARK: ${mark}`,"ok");
         setDraft(emptyInv());go("invoices");
-      }else{toast$(txt.match(/<message>([^<]+)<\/message>/)?.[1]||"Σφάλμα αποστολής","err");}
+      }else{toast$(json.error||"Σφάλμα αποστολής","err");}
     }catch(e){toast$("Σφάλμα: "+e.message,"err");}
     finally{setLoad(false);}
   };
@@ -453,10 +457,6 @@ function App(){
       </nav>
       {/* Footer */}
       <div style={{padding:"16px 20px",borderTop:`1px solid ${C.border}`}}>
-        <div style={{fontSize:12,color:C.muted,marginBottom:4}}>
-          <span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:cfg.sandbox?"#f59e0b":"#10b981",marginRight:6,verticalAlign:"middle"}}/>
-          {cfg.sandbox?"Sandbox":"Production"}
-        </div>
         {cfg.afm&&<div style={{fontSize:12,color:C.muted,marginBottom:6}}>ΑΦΜ: {cfg.afm}</div>}
         {user&&!user.demo&&<div style={{fontSize:12,color:C.muted,marginBottom:6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{user.email}</div>}
         {user&&<button style={{...btn("ghost",true),padding:"4px 0",fontSize:12,color:C.muted}} onClick={signOut}>Αποσύνδεση</button>}
@@ -746,28 +746,6 @@ function App(){
           </div>
           <div style={{...row,marginTop:14}}>
             <div style={col(2)}><label style={lbl}>Διεύθυνση</label><input style={inp} value={lc.addr} onChange={e=>setLc({...lc,addr:e.target.value})}/></div>
-          </div>
-        </div>
-
-        <div style={card}>
-          <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>myDATA API</h3>
-          <div style={{padding:"10px 14px",background:C.orangeL,borderRadius:8,fontSize:13,color:C.orange,marginBottom:16}}>
-            Βρες τα credentials στο <a href="https://mydata.aade.gr" target="_blank">mydata.aade.gr</a> → Ρυθμίσεις → Εφαρμογή myDATA API
-          </div>
-          <div style={row}>
-            <div style={col()}><label style={lbl}>aade-user-id</label><input style={inp} placeholder="username ΑΑΔΕ" value={lc.userId} onChange={e=>setLc({...lc,userId:e.target.value})}/></div>
-            <div style={col()}><label style={lbl}>Subscription Key</label><input style={{...inp,fontFamily:"monospace"}} type="password" value={lc.subKey} onChange={e=>setLc({...lc,subKey:e.target.value})}/></div>
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:10,marginTop:14}}>
-            <input type="checkbox" id="sb" checked={lc.sandbox} onChange={e=>setLc({...lc,sandbox:e.target.checked})} style={{width:16,height:16,accentColor:C.blue}}/>
-            <label htmlFor="sb" style={{fontSize:13,color:C.text2,cursor:"pointer"}}>Sandbox mode (δοκιμαστικό περιβάλλον)</label>
-          </div>
-        </div>
-
-        <div style={card}>
-          <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>Αναζήτηση ΑΦΜ (ΓΓΠΣ)</h3>
-          <div style={{padding:"10px 14px",background:C.greenL,borderRadius:8,fontSize:13,color:C.green}}>
-            ✓ Ενεργό — Πληκτρολόγησε ΑΦΜ στο νέο παραστατικό και πάτα <strong>🔍 ΓΓΠΣ</strong> για αυτόματη συμπλήρωση.
           </div>
         </div>
 
