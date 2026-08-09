@@ -1,4 +1,5 @@
-// Netlify Function: proxy για ΓΓΠΣ SOAP API (αποφεύγει CORS)
+// Netlify Function — ΓΓΠΣ proxy με τους δικούς σου κωδικούς
+// Ο χρήστης δεν χρειάζεται δικούς του κωδικούς ΓΓΠΣ
 exports.handler = async (event) => {
   const headers = {
     "Access-Control-Allow-Origin": "*",
@@ -9,19 +10,26 @@ exports.handler = async (event) => {
     return { statusCode: 200, headers, body: "" };
   }
 
-  let afmToSearch, calledByAfm, username, password;
-  try {
-    const body = JSON.parse(event.body || "{}");
-    afmToSearch  = body.afm;
-    calledByAfm  = body.calledByAfm;
-    username     = body.username;
-    password     = body.password;
-  } catch {
-    return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid request body" }) };
+  // Τα credentials σου — αποθηκεύονται ως Netlify env vars
+  // ΠΟΤΕ δεν εκτίθενται στο frontend
+  const GSIS_USER = process.env.GSIS_USERNAME;
+  const GSIS_PASS = process.env.GSIS_PASSWORD;
+  const GSIS_AFM  = process.env.GSIS_AFM; // το δικό σου ΑΦΜ
+
+  if (!GSIS_USER || !GSIS_PASS) {
+    return { statusCode: 500, headers, body: JSON.stringify({ error: "ΓΓΠΣ credentials not configured on server" }) };
   }
 
-  if (!afmToSearch || !username || !password) {
-    return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing required fields: afm, username, password" }) };
+  let afmToSearch;
+  try {
+    const body = JSON.parse(event.body || "{}");
+    afmToSearch = body.afm?.trim();
+  } catch {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Invalid request" }) };
+  }
+
+  if (!afmToSearch || afmToSearch.length < 9) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Εισάγετε έγκυρο ΑΦΜ" }) };
   }
 
   const soapBody = `<?xml version="1.0" encoding="UTF-8"?>
@@ -30,14 +38,14 @@ exports.handler = async (event) => {
   xmlns:ns="http://gr/gsis/rgwspublic/RgWsPublic.wsdl">
   <env:Header>
     <ns:RgWsPublicBasicAuth>
-      <ns:UserId>${username}</ns:UserId>
-      <ns:UserPassword>${password}</ns:UserPassword>
+      <ns:UserId>${GSIS_USER}</ns:UserId>
+      <ns:UserPassword>${GSIS_PASS}</ns:UserPassword>
     </ns:RgWsPublicBasicAuth>
   </env:Header>
   <env:Body>
     <ns:rgWsPublicAfmMethod>
       <ns:INPUT_REC>
-        <ns:afm_called_by>${calledByAfm || username}</ns:afm_called_by>
+        <ns:afm_called_by>${GSIS_AFM || GSIS_USER}</ns:afm_called_by>
         <ns:afm_called_for>${afmToSearch}</ns:afm_called_for>
       </ns:INPUT_REC>
     </ns:rgWsPublicAfmMethod>
@@ -47,58 +55,39 @@ exports.handler = async (event) => {
   try {
     const res = await fetch("https://www1.gsis.gr/wsaade/RgWsPublic2/RgWsPublic2", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/soap+xml;charset=UTF-8",
-        "SOAPAction": "",
-      },
+      headers: { "Content-Type": "application/soap+xml;charset=UTF-8" },
       body: soapBody,
     });
 
     const xml = await res.text();
-
-    // Parse XML response
     const get = (tag) => {
-      const m = xml.match(new RegExp(`<[^:]*:?${tag}[^>]*>([^<]*)<`));
+      const m = xml.match(new RegExp(`<[^:>]*:?${tag}[^>]*>([^<]*)<`));
       return m ? m[1].trim() : "";
     };
 
-    const errorCode = get("error_code") || get("pError_code");
-    if (errorCode && errorCode !== "0") {
-      const errorDescr = get("error_descr") || get("pError_descr") || "Σφάλμα ΓΓΠΣ";
-      return { statusCode: 200, headers, body: JSON.stringify({ error: errorDescr, code: errorCode }) };
+    const errCode = get("error_code") || get("pError_code");
+    if (errCode && errCode !== "0") {
+      const errMsg = get("error_descr") || get("pError_descr") || `Σφάλμα ΓΓΠΣ (${errCode})`;
+      return { statusCode: 200, headers, body: JSON.stringify({ error: errMsg }) };
     }
 
-    // Extract fields
+    const odos     = get("odos");
+    const arithmos = get("arithmos");
     const result = {
-      afm:           get("afm") || afmToSearch,
-      name:          get("onomasia") || get("eponymo"),
-      fullName:      get("full_name") || "",
-      legalName:     get("legalName") || "",
-      address:       get("parodos") ? `${get("odos")} ${get("arithmos")}, ${get("parodos")}`.trim() : `${get("odos")} ${get("arithmos")}`.trim(),
-      city:          get("poli") || get("perifereia") || "",
-      postalCode:    get("tk") || "",
-      doy:           get("doy_descr") || get("doy") || "",
-      registDate:    get("regist_date") || "",
-      stopDate:      get("stop_date") || "",
-      firm_flag:     get("firm_flag") || "",
-      i_ni_flag:     get("i_ni_flag") || "",     // Ν=Νομικό Πρόσωπο, Φ=Φυσικό
-      deactivated:   get("deactivate_flag") === "1",
-      activity:      get("kad_descr") || "",
-      activityCode:  get("kad_code") || "",
-      raw: xml,
+      afm:         afmToSearch,
+      name:        get("onomasia") || [get("eponymo"),get("onoma"),get("patronymo")].filter(Boolean).join(" "),
+      address:     [odos, arithmos].filter(Boolean).join(" "),
+      city:        get("poli") || get("perifereia"),
+      postalCode:  get("tk"),
+      doy:         get("doy_descr") || get("doy"),
+      activity:    get("kad_descr"),
+      activityCode:get("kad_code"),
+      deactivated: get("deactivate_flag") === "1",
     };
-
-    // Build clean display name
-    if (!result.name) {
-      const eponymo = get("eponymo");
-      const onoma   = get("onoma");
-      const patronymo = get("patronymo");
-      if (eponymo) result.name = [eponymo, onoma, patronymo].filter(Boolean).join(" ");
-    }
 
     return { statusCode: 200, headers, body: JSON.stringify({ ok: true, data: result }) };
 
   } catch (err) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "Network error: " + err.message }) };
+    return { statusCode: 500, headers, body: JSON.stringify({ error: "Σφάλμα σύνδεσης: " + err.message }) };
   }
 };
