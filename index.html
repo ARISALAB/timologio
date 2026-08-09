@@ -255,6 +255,189 @@ function makePDF(inv,cfg){
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NEW INVOICE FORM — top-level component, never re-created on parent render
+// ─────────────────────────────────────────────────────────────────────────────
+function NewInvoiceForm({cfg, gsis, setGsis, lookupGsis, loading, onDraft, onSubmit}){
+  const emptyInvLocal = () => ({type:"2.1",series:cfg.series||"Α",date:today(),cp:{name:"",afm:"",addr:"",city:"",country:"GR"},pm:3,lines:[emptyLine()],notes:""});
+  const [inv, setInv] = useState(emptyInvLocal);
+
+  // Expose inv to parent for submit
+  useEffect(()=>{ window.__currentInv = inv; },[inv]);
+
+  const updCp = useCallback((field,val)=>{
+    setInv(d=>({...d,cp:{...d.cp,[field]:val}}));
+  },[]);
+
+  const updLine=(i,f,v)=>setInv(d=>({...d,lines:d.lines.map((l,j)=>j!==i?l:calcLine({...l,[f]:v}))}));
+
+  const totalNet   = inv.lines.reduce((s,l)=>s+l.net,0);
+  const totalVat   = inv.lines.reduce((s,l)=>s+l.vat,0);
+
+  // When GSIS fills data, update inv.cp
+  useEffect(()=>{
+    if(gsis.status==="ok"&&gsis.info){
+      const d=gsis.info;
+      setInv(prev=>({...prev,cp:{...prev.cp,name:d.name||prev.cp.name,addr:d.address||prev.cp.addr,city:d.city||prev.cp.city,country:"GR"}}));
+    }
+  },[gsis.status]);
+
+  const handleLookup = ()=>{
+    window.__afmForLookup = inv.cp.afm;
+    lookupGsis(inv.cp.afm);
+  };
+
+  const handleSubmit = ()=>onSubmit(inv, totalNet, totalVat, totalGross);
+  const handleDraft  = ()=>onDraft(inv, totalNet, totalVat, totalGross);
+
+  return(
+    <div>
+      <div style={{marginBottom:24}}>
+        <h1 style={{fontSize:24,fontWeight:700,color:C.text}}>Νέο Παραστατικό</h1>
+      </div>
+
+      <div style={card}>
+        <h3 style={{fontSize:14,fontWeight:600,color:C.text,marginBottom:16}}>Στοιχεία Παραστατικού</h3>
+        <div style={row}>
+          <div style={col(2)}>
+            <label style={lbl}>Τύπος παραστατικού</label>
+            <select style={inp} value={inv.type} onChange={e=>setInv(d=>({...d,type:e.target.value}))}>
+              {INVOICE_TYPES.map(t=><option key={t.v} value={t.v}>{t.l}</option>)}
+            </select>
+          </div>
+          <div style={col(.5)}>
+            <label style={lbl}>Σειρά</label>
+            <input style={inp} value={inv.series} onChange={e=>setInv(d=>({...d,series:e.target.value}))}/>
+          </div>
+          <div style={col(.5)}>
+            <label style={lbl}>Α/Α</label>
+            <input style={{...inp,background:"#f9fafb",color:C.muted}} value={cfg.nextNum} readOnly/>
+          </div>
+          <div style={col(.8)}>
+            <label style={lbl}>Ημερομηνία</label>
+            <input type="date" style={inp} value={inv.date} onChange={e=>setInv(d=>({...d,date:e.target.value}))}/>
+          </div>
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <h3 style={{fontSize:14,fontWeight:600,color:C.text}}>Αντισυμβαλλόμενος</h3>
+          {gsis.status==="ok"&&<span style={{fontSize:12,color:C.green,fontWeight:500}}>✓ Στοιχεία από ΓΓΠΣ</span>}
+          {gsis.status==="err"&&<span style={{fontSize:12,color:C.red}}>{gsis.err}</span>}
+          {gsis.status==="loading"&&<span style={{fontSize:12,color:C.muted}}>Αναζήτηση...</span>}
+        </div>
+        <div style={row}>
+          <div style={col(2)}>
+            <label style={lbl}>Επωνυμία / Ονοματεπώνυμο</label>
+            <input style={inp} placeholder="π.χ. Ιωάννης Παπαδόπουλος"
+              value={inv.cp.name} onChange={e=>updCp("name",e.target.value)}/>
+          </div>
+          <div style={col()}>
+            <label style={lbl}>ΑΦΜ</label>
+            <div style={{display:"flex",gap:8}}>
+              <input style={{...inp,flex:1}} placeholder="123456789"
+                value={inv.cp.afm}
+                onChange={e=>updCp("afm",e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&handleLookup()}/>
+              <button style={{...btn("secondary"),padding:"9px 14px",whiteSpace:"nowrap",fontSize:13,opacity:gsis.status==="loading"?.6:1}}
+                onClick={handleLookup} disabled={gsis.status==="loading"}>
+                {gsis.status==="loading"?"...":"🔍 ΓΓΠΣ"}
+              </button>
+            </div>
+          </div>
+          <div style={col(.5)}>
+            <label style={lbl}>Χώρα</label>
+            <input style={inp} value={inv.cp.country} onChange={e=>updCp("country",e.target.value)}/>
+          </div>
+        </div>
+        {gsis.info&&(
+          <div style={{marginTop:12,padding:"10px 14px",background:C.greenL,border:`1px solid #a7f3d0`,borderRadius:8,fontSize:13,color:C.green}}>
+            <strong>{gsis.info.name}</strong>
+            {gsis.info.doy&&<span style={{color:C.muted}}> · ΔΟΥ: {gsis.info.doy}</span>}
+            {gsis.info.activity&&<span style={{color:C.muted}}> · {gsis.info.activity}</span>}
+            {gsis.info.deactivated&&<span style={{color:C.red,marginLeft:8}}>⚠ Ανενεργό ΑΦΜ</span>}
+          </div>
+        )}
+        <div style={{...row,marginTop:16}}>
+          <div style={col(2)}>
+            <label style={lbl}>Διεύθυνση</label>
+            <input style={inp} placeholder="Οδός, Αριθμός"
+              value={inv.cp.addr} onChange={e=>updCp("addr",e.target.value)}/>
+          </div>
+          <div style={col()}>
+            <label style={lbl}>Πόλη</label>
+            <input style={inp} value={inv.cp.city} onChange={e=>updCp("city",e.target.value)}/>
+          </div>
+          <div style={col()}>
+            <label style={lbl}>Τρόπος Πληρωμής</label>
+            <select style={inp} value={inv.pm} onChange={e=>setInv(d=>({...d,pm:Number(e.target.value)}))}>
+              {PMETHODS.map(p=><option key={p.v} value={p.v}>{p.l}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div style={card}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <h3 style={{fontSize:14,fontWeight:600,color:C.text}}>Γραμμές</h3>
+          <button style={btn("secondary",true)} onClick={()=>setInv(d=>({...d,lines:[...d.lines,emptyLine()]}))}>+ Γραμμή</button>
+        </div>
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",minWidth:680}}>
+            <thead>
+              <tr>{["Περιγραφή","Ποσ.","Τιμή μον.","ΦΠΑ","Καθαρό","ΦΠΑ €",""].map(h=><th key={h} style={th}>{h}</th>)}</tr>
+            </thead>
+            <tbody>
+              {inv.lines.map((l,i)=>(
+                <tr key={l.id}>
+                  <td style={td}><input style={{...inp,minWidth:180}} placeholder="Περιγραφή υπηρεσίας" value={l.desc} onChange={e=>updLine(i,"desc",e.target.value)}/></td>
+                  <td style={td}><input type="number" style={{...inp,width:65}} value={l.qty} onChange={e=>updLine(i,"qty",Number(e.target.value))}/></td>
+                  <td style={td}><input type="number" style={{...inp,width:95}} value={l.price} onChange={e=>updLine(i,"price",Number(e.target.value))}/></td>
+                  <td style={td}>
+                    <select style={{...inp,width:90}} value={l.vatCat} onChange={e=>updLine(i,"vatCat",Number(e.target.value))}>
+                      {VAT_CATS.map(v=><option key={v.v} value={v.v}>{v.l}</option>)}
+                    </select>
+                  </td>
+                  <td style={{...td,fontWeight:600,color:C.blue}}>€{fmt(l.net)}</td>
+                  <td style={{...td,color:C.muted}}>€{fmt(l.vat)}</td>
+                  <td style={td}>{inv.lines.length>1&&<button style={{background:"none",border:"none",color:C.placeholder,cursor:"pointer",fontSize:18,lineHeight:1,padding:4}} onClick={()=>setInv(d=>({...d,lines:d.lines.filter((_,j)=>j!==i)}))}>×</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{borderTop:`1px solid ${C.border}`,marginTop:16,paddingTop:16,display:"flex",justifyContent:"flex-end"}}>
+          <div style={{minWidth:240}}>
+            {[["Καθαρή αξία",`€${fmt(totalNet)}`],["ΦΠΑ",`€${fmt(totalVat)}`]].map(([l,v])=>(
+              <div key={l} style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                <span style={{color:C.muted}}>{l}</span>
+                <span style={{fontWeight:500}}>{v}</span>
+              </div>
+            ))}
+            <div style={{borderTop:`2px solid ${C.border}`,paddingTop:10,display:"flex",justifyContent:"space-between"}}>
+              <span style={{fontWeight:600,color:C.text}}>Σύνολο</span>
+              <span style={{fontWeight:700,fontSize:20,color:C.blue}}>€{fmt(totalGross)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={card}>
+        <label style={lbl}>Παρατηρήσεις <span style={{color:C.placeholder,fontWeight:400}}>(προαιρετικά)</span></label>
+        <textarea style={{...inp,height:72,resize:"vertical",lineHeight:1.5}} placeholder="π.χ. Εξόφληση εντός 30 ημερών" value={inv.notes} onChange={e=>setInv(d=>({...d,notes:e.target.value}))}/>
+      </div>
+
+      <div style={{display:"flex",gap:12,justifyContent:"flex-end",paddingBottom:40}}>
+        <button style={btn("secondary")} onClick={handleDraft}>Αποθήκευση ως πρόχειρο</button>
+        <button style={{...btn("primary"),opacity:loading?.6:1,minWidth:200}} onClick={handleSubmit} disabled={loading}>
+          {loading?"Αποστολή...":"Αποστολή στο myDATA →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AUTH SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
 function AuthScreen({onLogin}){
@@ -333,7 +516,7 @@ function App(){
   const [page,setPage]     = useState("dashboard");
   const [cfg,setCfgRaw]    = useState(()=>lsGet("myd_cfg",{name:"",afm:"",addr:"",nextNum:1,series:"Α"}));
   const [invoices,setInvs] = useState(()=>lsGet("myd_inv",[]));
-  const [draft,setDraft]   = useState(emptyInv());
+  const signOut=async()=>{if(sb)await sb.auth.signOut();setUser(null);};
   const [toast,setToast]   = useState(null);
   const [loading,setLoad]  = useState(false);
   const [mob,setMob]       = useState(false);
@@ -362,55 +545,43 @@ function App(){
   const saveCfg=(val,sync=true)=>{setCfgRaw(val);lsSet("myd_cfg",val);if(sync&&sb&&user&&!user.demo)sb.from("user_settings").upsert({user_id:user.id,settings:val},{onConflict:"user_id"});};
   const addInv=async(inv)=>{const a=[inv,...invoices];setInvs(a);lsSet("myd_inv",a);if(sb&&user&&!user.demo)await sb.from("invoices").insert({user_id:user.id,series:inv.series,number:inv.number,issue_date:inv.date,invoice_type:inv.type,counterpart_name:inv.cp?.name,counterpart_vat:inv.cp?.afm,total_net:inv.totalNet,total_vat:inv.totalVat,total_gross:inv.totalGross,status:inv.status,mark:inv.mark,uid:inv.invUid,payload:inv});};
   const toast$=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),3800);};
-  const go=pg=>{setPage(pg);setMob(false);if(pg==="new"){setDraft(emptyInv());setGsis({status:null,err:"",info:null});}};
-  const signOut=async()=>{if(sb)await sb.auth.signOut();setUser(null);};
+  const go=pg=>{setPage(pg);setMob(false);if(pg==="new"){setGsis({status:null,err:"",info:null});}};  const signOut=async()=>{if(sb)await sb.auth.signOut();setUser(null);};
 
-  const totalNet   = draft.lines.reduce((s,l)=>s+l.net,0);
-  const totalVat   = draft.lines.reduce((s,l)=>s+l.vat,0);
-  const totalGross = totalNet+totalVat;
-  const updLine=(i,f,v)=>setDraft(d=>({...d,lines:d.lines.map((l,j)=>j!==i?l:calcLine({...l,[f]:v}))}));
 
-  const lookupGsis=async()=>{
-    const afm=draft.cp.afm?.trim();
+  const lookupGsis=async(afmParam)=>{
+    const afm=(afmParam||"").trim();
     if(!afm||afm.length<9){setGsis({status:"err",err:"Εισάγετε έγκυρο ΑΦΜ (9 ψηφία)",info:null});return;}
     setGsis({status:"loading",err:"",info:null});
     try{
       const res=await fetch("/.netlify/functions/gsis-lookup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({afm})});
       const json=await res.json();
       if(json.error){setGsis({status:"err",err:json.error,info:null});return;}
-      const d=json.data;
-      setGsis({status:"ok",err:"",info:d});
-      setDraft(p=>({...p,cp:{...p.cp,name:d.name||p.cp.name,addr:d.address||p.cp.addr,city:d.city||p.cp.city,country:"GR"}}));
+      setGsis({status:"ok",err:"",info:json.data});
     }catch(e){setGsis({status:"err",err:"Σφάλμα σύνδεσης",info:null});}
   };
 
-  const submitMyData=async()=>{
+  const submitMyData=async(inv,totalNet,totalVat,totalGross)=>{
     if(!cfg.afm){toast$("Συμπλήρωσε το ΑΦΜ σου στις Ρυθμίσεις","err");return;}
     setLoad(true);
     try{
       const num=cfg.nextNum;
-      const xml=buildXML(draft,cfg,num);
-      // Στέλνει μέσω Netlify Function — τα myDATA credentials είναι κρυμμένα στον server
-      const res=await fetch("/.netlify/functions/mydata-send",{
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({xml}),
-      });
+      const xml=buildXML(inv,cfg,num);
+      const res=await fetch("/.netlify/functions/mydata-send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({xml})});
       const json=await res.json();
       if(json.error){toast$(json.error,"err");return;}
       const mark=json.mark; const invUid=json.uid;
       if(mark){
-        const saved={...draft,id:Date.now(),number:num,issueDate:draft.date,mark,invUid,totalNet,totalVat,totalGross,status:"sent",cpName:draft.cp.name};
+        const saved={...inv,id:Date.now(),number:num,issueDate:inv.date,mark,invUid,totalNet,totalVat,totalGross,status:"sent",cpName:inv.cp.name};
         await addInv(saved);saveCfg({...cfg,nextNum:num+1});
         toast$(`Εστάλη επιτυχώς! MARK: ${mark}`,"ok");
-        setDraft(emptyInv());go("invoices");
+        go("invoices");
       }else{toast$(json.error||"Σφάλμα αποστολής","err");}
     }catch(e){toast$("Σφάλμα: "+e.message,"err");}
     finally{setLoad(false);}
   };
 
-  const saveDraft=async()=>{
-    const saved={...draft,id:Date.now(),number:cfg.nextNum,issueDate:draft.date,totalNet,totalVat,totalGross,status:"draft",cpName:draft.cp.name};
+  const saveDraft=async(inv,totalNet,totalVat,totalGross)=>{
+    const saved={...inv,id:Date.now(),number:cfg.nextNum,issueDate:inv.date,totalNet,totalVat,totalGross,status:"draft",cpName:inv.cp.name};
     await addInv(saved);toast$("Αποθηκεύτηκε ως πρόχειρο","ok");go("invoices");
   };
 
@@ -532,14 +703,6 @@ function App(){
     </div>
   );
 
-  // ── NEW INVOICE ────────────────────────────────────────────────────────────────
-  const NewInvoice=()=>{
-    const [cp,setCp]=useState(()=>draft.cp);
-    const updCp=useCallback((field,val)=>{
-      setCp(prev=>{const u={...prev,[field]:val};setDraft(d=>({...d,cp:u}));return u;});
-    },[]);
-    useEffect(()=>{setCp(draft.cp);},[draft.cp.name,draft.cp.addr,draft.cp.city,draft.cp.afm]);
-    return (<div>
       <div style={{marginBottom:24}}>
         <h1 style={{fontSize:24,fontWeight:700,color:C.text}}>Νέο Παραστατικό</h1>
       </div>
@@ -549,144 +712,6 @@ function App(){
         <div style={row}>
           <div style={col(2)}>
             <label style={lbl}>Τύπος παραστατικού</label>
-            <select style={inp} value={draft.type} onChange={e=>setDraft({...draft,type:e.target.value})}>
-              {INVOICE_TYPES.map(t=><option key={t.v} value={t.v}>{t.l}</option>)}
-            </select>
-          </div>
-          <div style={col(.5)}>
-            <label style={lbl}>Σειρά</label>
-            <input style={inp} value={draft.series} onChange={e=>setDraft({...draft,series:e.target.value})}/>
-          </div>
-          <div style={col(.5)}>
-            <label style={lbl}>Α/Α</label>
-            <input style={{...inp,background:"#f9fafb",color:C.muted}} value={cfg.nextNum} readOnly/>
-          </div>
-          <div style={col(.8)}>
-            <label style={lbl}>Ημερομηνία</label>
-            <input type="date" style={inp} value={draft.date} onChange={e=>setDraft({...draft,date:e.target.value})}/>
-          </div>
-        </div>
-      </div>
-
-      <div style={card}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-          <h3 style={{fontSize:14,fontWeight:600,color:C.text}}>Αντισυμβαλλόμενος</h3>
-          {gsis.status==="ok"&&<span style={{fontSize:12,color:C.green,fontWeight:500}}>✓ Στοιχεία από ΓΓΠΣ</span>}
-          {gsis.status==="err"&&<span style={{fontSize:12,color:C.red}}>{gsis.err}</span>}
-          {gsis.status==="loading"&&<span style={{fontSize:12,color:C.muted}}>Αναζήτηση...</span>}
-        </div>
-
-        <div style={row}>
-          <div style={col(2)}>
-            <label style={lbl}>Επωνυμία / Ονοματεπώνυμο</label>
-            <input style={inp} placeholder="π.χ. Ιωάννης Παπαδόπουλος" value={cp.name} onChange={e=>updCp("name",e.target.value)}/>
-          </div>
-          <div style={col()}>
-            <label style={lbl}>ΑΦΜ</label>
-            <div style={{display:"flex",gap:8}}>
-              <input style={{...inp,flex:1}} placeholder="123456789" value={cp.afm}
-                onChange={e=>updCp("afm",e.target.value)}
-                onKeyDown={e=>e.key==="Enter"&&lookupGsis()}/>
-              <button style={{...btn("secondary"),padding:"9px 14px",whiteSpace:"nowrap",fontSize:13,opacity:gsis.status==="loading"?.6:1}}
-                onClick={lookupGsis} disabled={gsis.status==="loading"}>
-                {gsis.status==="loading"?"...":"🔍 ΓΓΠΣ"}
-              </button>
-            </div>
-          </div>
-          <div style={col(.5)}>
-            <label style={lbl}>Χώρα</label>
-            <input style={inp} value={cp.country} onChange={e=>updCp("country",e.target.value)}/>
-          </div>
-        </div>
-
-        {gsis.info&&(
-          <div style={{marginTop:12,padding:"10px 14px",background:C.greenL,border:`1px solid #a7f3d0`,borderRadius:8,fontSize:13,color:C.green}}>
-            <strong>{gsis.info.name}</strong>
-            {gsis.info.doy&&<span style={{color:C.muted}}> · ΔΟΥ: {gsis.info.doy}</span>}
-            {gsis.info.activity&&<span style={{color:C.muted}}> · {gsis.info.activity}</span>}
-            {gsis.info.deactivated&&<span style={{color:C.red,marginLeft:8}}>⚠ Ανενεργό ΑΦΜ</span>}
-          </div>
-        )}
-
-        <div style={{...row,marginTop:16}}>
-          <div style={col(2)}>
-            <label style={lbl}>Διεύθυνση</label>
-            <input style={inp} placeholder="Οδός, Αριθμός" value={cp.addr} onChange={e=>updCp("addr",e.target.value)}/>
-          </div>
-          <div style={col()}>
-            <label style={lbl}>Πόλη</label>
-            <input style={inp} value={cp.city} onChange={e=>updCp("city",e.target.value)}/>
-          </div>
-          <div style={col()}>
-            <label style={lbl}>Τρόπος Πληρωμής</label>
-            <select style={inp} value={draft.pm} onChange={e=>setDraft({...draft,pm:Number(e.target.value)})}>
-              {PMETHODS.map(p=><option key={p.v} value={p.v}>{p.l}</option>)}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div style={card}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-          <h3 style={{fontSize:14,fontWeight:600,color:C.text}}>Γραμμές</h3>
-          <button style={btn("secondary",true)} onClick={()=>setDraft({...draft,lines:[...draft.lines,emptyLine()]})}>+ Γραμμή</button>
-        </div>
-        <div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",minWidth:680}}>
-            <thead>
-              <tr>{["Περιγραφή","Ποσ.","Τιμή μον.","ΦΠΑ","Καθαρό","ΦΠΑ €",""].map(h=><th key={h} style={th}>{h}</th>)}</tr>
-            </thead>
-            <tbody>
-              {draft.lines.map((l,i)=>(
-                <tr key={l.id}>
-                  <td style={td}><input style={{...inp,minWidth:180}} placeholder="Περιγραφή υπηρεσίας" value={l.desc} onChange={e=>updLine(i,"desc",e.target.value)}/></td>
-                  <td style={td}><input type="number" style={{...inp,width:65}} value={l.qty} onChange={e=>updLine(i,"qty",Number(e.target.value))}/></td>
-                  <td style={td}><input type="number" style={{...inp,width:95}} value={l.price} onChange={e=>updLine(i,"price",Number(e.target.value))}/></td>
-                  <td style={td}>
-                    <select style={{...inp,width:90}} value={l.vatCat} onChange={e=>updLine(i,"vatCat",Number(e.target.value))}>
-                      {VAT_CATS.map(v=><option key={v.v} value={v.v}>{v.l}</option>)}
-                    </select>
-                  </td>
-                  <td style={{...td,fontWeight:600,color:C.blue}}>€{fmt(l.net)}</td>
-                  <td style={{...td,color:C.muted}}>€{fmt(l.vat)}</td>
-                  <td style={td}>{draft.lines.length>1&&<button style={{background:"none",border:"none",color:C.placeholder,cursor:"pointer",fontSize:18,lineHeight:1,padding:4}} onClick={()=>setDraft({...draft,lines:draft.lines.filter((_,j)=>j!==i)})}>×</button>}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <div style={{borderTop:`1px solid ${C.border}`,marginTop:16,paddingTop:16,display:"flex",justifyContent:"flex-end"}}>
-          <div style={{minWidth:240}}>
-            {[["Καθαρή αξία",`€${fmt(totalNet)}`],["ΦΠΑ",`€${fmt(totalVat)}`]].map(([l,v])=>(
-              <div key={l} style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-                <span style={{color:C.muted}}>{l}</span>
-                <span style={{fontWeight:500}}>{v}</span>
-              </div>
-            ))}
-            <div style={{borderTop:`2px solid ${C.border}`,paddingTop:10,display:"flex",justifyContent:"space-between"}}>
-              <span style={{fontWeight:600,color:C.text}}>Σύνολο</span>
-              <span style={{fontWeight:700,fontSize:20,color:C.blue}}>€{fmt(totalGross)}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div style={card}>
-        <label style={lbl}>Παρατηρήσεις <span style={{color:C.placeholder,fontWeight:400}}>(προαιρετικά)</span></label>
-        <textarea style={{...inp,height:72,resize:"vertical",lineHeight:1.5}} placeholder="π.χ. Εξόφληση εντός 30 ημερών" value={draft.notes} onChange={e=>setDraft({...draft,notes:e.target.value})}/>
-      </div>
-
-      <div style={{display:"flex",gap:12,justifyContent:"flex-end",paddingBottom:40}}>
-        <button style={btn("secondary")} onClick={saveDraft}>Αποθήκευση ως πρόχειρο</button>
-        <button style={{...btn("primary"),opacity:loading?.6:1,minWidth:200}} onClick={submitMyData} disabled={loading}>
-          {loading?"Αποστολή...":"Αποστολή στο myDATA →"}
-        </button>
-      </div>
-    </div>
-    );
-  };
-
   // ── INVOICES LIST ──────────────────────────────────────────────────────────────
   const InvList=()=>{
     const [flt,setFlt]=useState("all");
@@ -794,7 +819,12 @@ function App(){
       {/* Main */}
       <div style={isMob?{padding:"16px 14px",paddingTop:60}:{marginLeft:SIDEBAR_W,padding:"36px 40px",maxWidth:SIDEBAR_W+960}}>
         {page==="dashboard"&&<Dashboard/>}
-        {page==="new"&&<NewInvoice/>}
+        {page==="new"&&<NewInvoiceForm
+          cfg={cfg} gsis={gsis} setGsis={setGsis}
+          lookupGsis={lookupGsis} loading={loading}
+          onDraft={saveDraft} onSubmit={submitMyData}
+          onSaved={()=>go("invoices")}
+        />}
         {page==="invoices"&&<InvList/>}
         {page==="settings"&&<Settings/>}
       </div>
