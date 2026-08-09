@@ -688,7 +688,8 @@ function App(){
   };
 
   // ── INVOICES LIST ──────────────────────────────────────────────────────────────
-  const InvList=()=>{\n    const [flt,setFlt]=useState("all");
+  const InvList=()=>{
+    const [flt,setFlt]=useState("all");
     const list=flt==="all"?invoices:invoices.filter(i=>i.status===flt);
     return(
       <div>
